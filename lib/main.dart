@@ -186,6 +186,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   Duration last = Duration.zero;
   final FocusNode gameFocus = FocusNode();
   final TextEditingController nameCtrl = TextEditingController();
+  final ValueNotifier<double> homeClock = ValueNotifier(0);
   SharedPreferences? prefs;
 
   Screen screen = Screen.home;
@@ -329,6 +330,8 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     if (screen == Screen.play) {
       _update(dt);
       setState(() {});
+    } else {
+      homeClock.value = t.inMicroseconds / 1e6;
     }
   }
 
@@ -518,125 +521,210 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     );
   }
 
-  Widget _pill(String text, List<Color> colors, VoidCallback onTap, {double w = 160, double h = 56, double fs = 20}) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: w,
-        height: h,
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          gradient: LinearGradient(colors: colors, begin: Alignment.topCenter, end: Alignment.bottomCenter),
-          borderRadius: BorderRadius.circular(h / 2),
-          border: Border.all(color: Colors.white24, width: 2),
-          boxShadow: const [BoxShadow(color: Colors.black38, blurRadius: 8, offset: Offset(0, 4))],
-        ),
-        child: Text(text,
-            style: TextStyle(
-                color: Colors.white,
-                fontSize: fs,
-                fontWeight: FontWeight.w900,
-                shadows: const [Shadow(color: Colors.black87, blurRadius: 3, offset: Offset(1, 2))])),
+  // ---------------------------------------------------------------- NEW HOME UI
+  Widget _glass({required Widget child, EdgeInsets padding = const EdgeInsets.all(14), double radius = 22, Color? border}) {
+    return Container(
+      padding: padding,
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.07),
+        borderRadius: BorderRadius.circular(radius),
+        border: Border.all(color: border ?? Colors.white.withOpacity(0.14), width: 1.5),
+      ),
+      child: child,
+    );
+  }
+
+  Widget _statCard(IconData icon, Color c, String title, int score, int kills) {
+    return Expanded(
+      child: _glass(
+        child: Row(children: [
+          Icon(icon, color: c, size: 30),
+          const SizedBox(width: 10),
+          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(title, style: const TextStyle(color: Colors.white54, fontSize: 11, letterSpacing: 1.4, fontWeight: FontWeight.w700)),
+            Text('$score', style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w900)),
+            Text('$kills kills', style: TextStyle(color: c, fontSize: 12, fontWeight: FontWeight.w600)),
+          ]),
+        ]),
       ),
     );
   }
 
-  Widget _stats(String title, int score, int kills) {
-    const lab = TextStyle(color: Color(0xFF8FA8FF), fontWeight: FontWeight.bold, fontSize: 14);
-    return Column(children: [
-      Text(title, style: lab.copyWith(color: Colors.white54)),
-      const SizedBox(height: 6),
-      Text('Score  $score', style: lab),
-      Text('Kills  $kills', style: lab.copyWith(color: const Color(0xFFFF8F8F))),
-    ]);
-  }
-
-  Widget _iconBtn(IconData icon, Color color, String label, VoidCallback onTap) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Column(mainAxisSize: MainAxisSize.min, children: [
-        Icon(icon, size: 56, color: color),
-        const SizedBox(height: 4),
-        Text(label,
-            style: const TextStyle(
-                color: Color(0xFF7CFFB0), fontWeight: FontWeight.bold, fontSize: 15, shadows: [Shadow(color: Colors.black54, blurRadius: 3)])),
-      ]),
+  Widget _dockItem(IconData icon, Color c, String label, String sub, VoidCallback onTap) {
+    return Expanded(
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Container(
+            width: 56,
+            height: 56,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: c.withOpacity(0.16),
+              border: Border.all(color: c.withOpacity(0.8), width: 2),
+              boxShadow: [BoxShadow(color: c.withOpacity(0.35), blurRadius: 14)],
+            ),
+            child: Icon(icon, color: c, size: 28),
+          ),
+          const SizedBox(height: 6),
+          Text(label, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 13)),
+          Text(sub, style: const TextStyle(color: Colors.white54, fontSize: 11)),
+        ]),
+      ),
     );
   }
 
   Widget _home() {
-    final title = Transform.rotate(
-      angle: -0.12,
-      child: Stack(children: [
-        Text('slither.io',
-            style: TextStyle(
-                fontSize: 54,
-                fontWeight: FontWeight.w900,
-                foreground: Paint()
-                  ..style = PaintingStyle.stroke
-                  ..strokeWidth = 9
-                  ..color = Colors.black)),
-        ShaderMask(
-          shaderCallback: (r) => const LinearGradient(
-              colors: [Colors.cyanAccent, Colors.lightGreenAccent, Colors.yellow, Colors.orangeAccent, Colors.pinkAccent, Colors.purpleAccent])
-              .createShader(r),
-          child: const Text('slither.io', style: TextStyle(fontSize: 54, fontWeight: FontWeight.w900, color: Colors.white)),
-        ),
-      ]),
-    );
-
     return Stack(children: [
-      Positioned.fill(child: CustomPaint(painter: SunburstPainter())),
+      Positioned.fill(child: CustomPaint(painter: HomeBgPainter(homeClock))),
       SafeArea(
-        child: LayoutBuilder(
-          builder: (context, box) => SingleChildScrollView(
-            child: ConstrainedBox(
-              constraints: BoxConstraints(minHeight: box.maxHeight),
-              child: Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
-                const SizedBox(height: 10),
-                SizedBox(
-                  width: 320,
-                  height: 260,
-                  child: Stack(children: [
-                    CustomPaint(size: const Size(320, 260), painter: HomeSnakePainter()),
-                    Positioned(top: 70, left: 0, right: 0, child: Center(child: title)),
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 440),
+            child: LayoutBuilder(
+              builder: (context, box) => SingleChildScrollView(
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(minHeight: box.maxHeight - 24),
+                  child: Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
+                    // ---- title
+                    Column(children: [
+                      const Text('EAT  •  GROW  •  SURVIVE',
+                          style: TextStyle(color: kCyan, fontSize: 12, letterSpacing: 4, fontWeight: FontWeight.w700)),
+                      const SizedBox(height: 6),
+                      Text('SNAKE',
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 58,
+                              height: 1.0,
+                              fontWeight: FontWeight.w900,
+                              letterSpacing: 6,
+                              shadows: [Shadow(color: kCyan.withOpacity(0.7), blurRadius: 26)])),
+                      ShaderMask(
+                        shaderCallback: (r) => const LinearGradient(colors: [kLime, kCyan]).createShader(r),
+                        child: const Text('Baba',
+                            style: TextStyle(color: Colors.white, fontSize: 58, height: 0.95, fontWeight: FontWeight.w900, letterSpacing: 10)),
+                      ),
+                    ]),
+                    const SizedBox(height: 14),
+                    // ---- snake preview card
+                    GestureDetector(
+                      onTap: _skinSheet,
+                      child: _glass(
+                        padding: EdgeInsets.zero,
+                        radius: 28,
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(26),
+                          child: SizedBox(
+                            height: 130,
+                            child: Stack(children: [
+                              Positioned.fill(child: CustomPaint(painter: SnakePreviewPainter(homeClock, skin, playerColor))),
+                              Positioned(
+                                left: 16,
+                                top: 12,
+                                child: Text('${skinNames[skin].toUpperCase()} SKIN',
+                                    style: const TextStyle(color: Colors.white60, fontSize: 11, letterSpacing: 2, fontWeight: FontWeight.w700)),
+                              ),
+                              Positioned(
+                                right: 12,
+                                top: 10,
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                  decoration: BoxDecoration(color: Colors.white12, borderRadius: BorderRadius.circular(14)),
+                                  child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                                    Icon(Icons.edit, size: 13, color: Colors.white70),
+                                    SizedBox(width: 4),
+                                    Text('CHANGE', style: TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.w700)),
+                                  ]),
+                                ),
+                              ),
+                            ]),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    // ---- nickname
+                    TextField(
+                      controller: nameCtrl,
+                      maxLength: 15,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600),
+                      decoration: InputDecoration(
+                        counterText: '',
+                        hintText: 'Nickname (optional)',
+                        hintStyle: const TextStyle(color: Colors.white38),
+                        prefixIcon: const Icon(Icons.person_outline, color: Colors.white38),
+                        filled: true,
+                        fillColor: Colors.white.withOpacity(0.07),
+                        contentPadding: const EdgeInsets.symmetric(vertical: 14),
+                        enabledBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(30), borderSide: const BorderSide(color: Colors.white24, width: 1.5)),
+                        focusedBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(30), borderSide: const BorderSide(color: kLime, width: 2)),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    // ---- play buttons
+                    GestureDetector(
+                      onTap: () => startGame(25),
+                      child: Container(
+                        width: double.infinity,
+                        height: 72,
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(36),
+                          gradient: const LinearGradient(colors: [kLime, Color(0xFF1DE9B6)]),
+                          boxShadow: [BoxShadow(color: kLime.withOpacity(0.5), blurRadius: 26, offset: const Offset(0, 6))],
+                        ),
+                        child: const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                          Icon(Icons.play_arrow_rounded, size: 44, color: Color(0xFF0B2A12)),
+                          SizedBox(width: 6),
+                          Text('PLAY', style: TextStyle(color: Color(0xFF0B2A12), fontSize: 30, fontWeight: FontWeight.w900, letterSpacing: 4)),
+                        ]),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    GestureDetector(
+                      onTap: () => startGame(40),
+                      child: Container(
+                        width: double.infinity,
+                        height: 50,
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(25),
+                          border: Border.all(color: kPink, width: 2),
+                          color: kPink.withOpacity(0.10),
+                        ),
+                        child: const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                          Icon(Icons.local_fire_department, color: kPink),
+                          SizedBox(width: 8),
+                          Text('HARDCORE  •  40 BOTS',
+                              style: TextStyle(color: kPink, fontSize: 15, fontWeight: FontWeight.w800, letterSpacing: 1.5)),
+                        ]),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    // ---- stats
+                    Row(children: [
+                      _statCard(Icons.history, kCyan, 'LAST RUN', lastScore, lastKills),
+                      const SizedBox(width: 12),
+                      _statCard(Icons.emoji_events, Colors.amber, 'BEST', bestScore, bestKills),
+                    ]),
+                    const SizedBox(height: 16),
+                    // ---- dock
+                    _glass(
+                      radius: 32,
+                      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+                      child: Row(children: [
+                        _dockItem(Icons.palette, playerColor, 'Skins', skinNames[skin], _skinSheet),
+                        _dockItem(Icons.map_rounded, kCyan, 'Map', mapNames[mapChoice], _mapSheet),
+                        _dockItem(Icons.tune, kViolet, 'Settings', 'Sound & more', _settingsSheet),
+                      ]),
+                    ),
+                    const SizedBox(height: 6),
                   ]),
                 ),
-                const SizedBox(height: 20),
-                SizedBox(
-                  width: 260,
-                  child: TextField(
-                    controller: nameCtrl,
-                    maxLength: 15,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(color: Colors.white, fontSize: 18),
-                    decoration: InputDecoration(
-                      counterText: '',
-                      hintText: 'Nickname (optional)',
-                      hintStyle: const TextStyle(color: Colors.white38),
-                      filled: true,
-                      fillColor: Colors.white12,
-                      contentPadding: const EdgeInsets.symmetric(vertical: 12),
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(30), borderSide: BorderSide.none),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 24),
-                Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
-                  Expanded(child: _stats('Last game', lastScore, lastKills)),
-                  _pill('play!', const [Color(0xFF2F8BFF), Color(0xFF0B3C9E)], () => startGame(25), w: 160, h: 80, fs: 28),
-                  Expanded(child: _stats('Your best ever', bestScore, bestKills)),
-                ]),
-                const SizedBox(height: 16),
-                _pill('PLAY VS A.I.', const [Color(0xFF8E6BFF), Color(0xFF5030B8)], () => startGame(40), w: 180, h: 56, fs: 18),
-                const SizedBox(height: 24),
-                Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
-                  _iconBtn(Icons.bug_report_rounded, playerColor, 'Change Slither', _changeSkin),
-                  _iconBtn(Icons.settings, const Color(0xFF8E6BFF), 'Settings', _settings),
-                  _iconBtn(Icons.public, Colors.lightBlueAccent, 'Choose Map', _chooseMap),
-                ]),
-                const SizedBox(height: 10),
-              ]),
+              ),
             ),
           ),
         ),
@@ -644,113 +732,208 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     ]);
   }
 
-  void _changeSkin() {
-    showDialog(
+  // ---------------------------------------------------------------- bottom sheets
+  void _sheet(String title, List<Widget> Function(StateSetter) build) {
+    showModalBottomSheet(
       context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      constraints: const BoxConstraints(maxWidth: 520),
       builder: (_) => StatefulBuilder(
-        builder: (ctx, setD) => AlertDialog(
-          title: const Text('Change Slither'),
-          content: SingleChildScrollView(
-            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Text('Color'),
-              const SizedBox(height: 8),
-              Wrap(spacing: 10, runSpacing: 10, children: [
-                for (int i = 0; i < colorChoices.length; i++)
-                  GestureDetector(
-                    onTap: () {
-                      setState(() => colorIdx = i);
-                      setD(() {});
-                    },
-                    child: CircleAvatar(
-                      backgroundColor: colorChoices[i],
-                      radius: 17,
-                      child: colorIdx == i ? const Icon(Icons.check, color: Colors.black, size: 18) : null,
-                    ),
-                  )
-              ]),
-              const Divider(height: 24),
-              const Text('Skin'),
-              for (int k = 0; k < skinNames.length; k++)
-                InkWell(
-                  onTap: () {
-                    setState(() => skin = k);
-                    setD(() {});
-                  },
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 6),
-                    child: Row(children: [
-                      Icon(skin == k ? Icons.radio_button_checked : Icons.radio_button_off, size: 20),
-                      const SizedBox(width: 8),
-                      SizedBox(width: 70, child: Text(skinNames[k])),
-                      for (int i = 0; i < 8; i++)
-                        Container(
-                          width: 16,
-                          height: 16,
-                          margin: const EdgeInsets.only(right: 1),
-                          decoration: BoxDecoration(color: skinColor(k, playerColor, i, 8), shape: BoxShape.circle),
-                        ),
-                    ]),
-                  ),
-                ),
-            ]),
+        builder: (ctx, setD) => Container(
+          decoration: BoxDecoration(
+            color: const Color(0xFF181236),
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(30)),
+            border: Border.all(color: Colors.white12),
           ),
-          actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('OK'))],
+          child: SafeArea(
+            top: false,
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
+              child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Center(
+                    child: Container(
+                        width: 44, height: 5, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(3)))),
+                const SizedBox(height: 16),
+                Text(title, style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.w900)),
+                const SizedBox(height: 16),
+                ...build(setD),
+              ]),
+            ),
+          ),
         ),
       ),
     ).then((_) => _save());
   }
 
-  void _settings() {
-    Widget sw(String t, bool v, void Function(bool) f, StateSetter setD) => SwitchListTile(
-        title: Text(t),
+  Widget _label(String t) => Padding(
+    padding: const EdgeInsets.only(top: 18, bottom: 10),
+    child: Text(t, style: const TextStyle(color: Colors.white54, fontSize: 12, letterSpacing: 2, fontWeight: FontWeight.w800)),
+  );
+
+  void _skinSheet() {
+    _sheet('Your Snake', (setD) {
+      final tw = (min(MediaQuery.of(context).size.width, 520) - 52) / 2;
+      return [
+        Container(
+          height: 80,
+          decoration: BoxDecoration(color: Colors.white.withOpacity(0.05), borderRadius: BorderRadius.circular(20)),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(20),
+            child: CustomPaint(painter: SnakePreviewPainter(homeClock, skin, playerColor), size: Size.infinite),
+          ),
+        ),
+        _label('COLOR'),
+        Wrap(spacing: 12, runSpacing: 12, children: [
+          for (int i = 0; i < colorChoices.length; i++)
+            GestureDetector(
+              onTap: () {
+                setState(() => colorIdx = i);
+                setD(() {});
+              },
+              child: Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  color: colorChoices[i],
+                  shape: BoxShape.circle,
+                  border: Border.all(color: colorIdx == i ? Colors.white : Colors.transparent, width: 3),
+                  boxShadow: colorIdx == i ? [BoxShadow(color: colorChoices[i].withOpacity(0.6), blurRadius: 12)] : null,
+                ),
+              ),
+            ),
+        ]),
+        _label('SKIN'),
+        Wrap(spacing: 12, runSpacing: 12, children: [
+          for (int k = 0; k < skinNames.length; k++)
+            GestureDetector(
+              onTap: () {
+                setState(() => skin = k);
+                setD(() {});
+              },
+              child: Container(
+                width: tw,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: skin == k ? kLime.withOpacity(0.14) : Colors.white.withOpacity(0.06),
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(color: skin == k ? kLime : Colors.white12, width: 2),
+                ),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(skinNames[k], style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800)),
+                  const SizedBox(height: 8),
+                  Row(children: [
+                    for (int i = 0; i < 7; i++)
+                      Container(
+                        width: 14,
+                        height: 14,
+                        margin: const EdgeInsets.only(right: 2),
+                        decoration: BoxDecoration(color: skinColor(k, playerColor, i, 7), shape: BoxShape.circle),
+                      ),
+                  ]),
+                ]),
+              ),
+            ),
+        ]),
+      ];
+    });
+  }
+
+  void _mapSheet() {
+    const desc = ['Fast & furious', 'Balanced fun', 'Epic hunt'];
+    _sheet('Choose Map', (setD) {
+      return [
+        for (int i = 0; i < mapSizes.length; i++)
+          GestureDetector(
+            onTap: () {
+              setState(() => mapChoice = i);
+              setD(() {});
+            },
+            child: Container(
+              margin: const EdgeInsets.only(bottom: 12),
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: mapChoice == i ? kCyan.withOpacity(0.12) : Colors.white.withOpacity(0.06),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: mapChoice == i ? kCyan : Colors.white12, width: 2),
+              ),
+              child: Row(children: [
+                SizedBox(
+                  width: 56,
+                  height: 56,
+                  child: Center(
+                    child: Container(
+                      width: 22.0 + i * 15,
+                      height: 22.0 + i * 15,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: kCyan, width: 2),
+                        color: kCyan.withOpacity(0.15),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text(mapNames[i], style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w800)),
+                    Text('${mapSizes[i].toInt()} x ${mapSizes[i].toInt()}  •  ${desc[i]}',
+                        style: const TextStyle(color: Colors.white54, fontSize: 13)),
+                  ]),
+                ),
+                if (mapChoice == i) const Icon(Icons.check_circle, color: kCyan),
+              ]),
+            ),
+          ),
+      ];
+    });
+  }
+
+  Widget _sw(String t, IconData ic, bool v, void Function(bool) f, StateSetter setD) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      decoration: BoxDecoration(color: Colors.white.withOpacity(0.06), borderRadius: BorderRadius.circular(18)),
+      child: SwitchListTile(
+        secondary: Icon(ic, color: Colors.white70),
+        title: Text(t, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
         value: v,
+        activeColor: kLime,
         onChanged: (x) {
           setState(() => f(x));
           setD(() {});
-        });
-    showDialog(
-      context: context,
-      builder: (_) => StatefulBuilder(
-        builder: (ctx, setD) => AlertDialog(
-          title: const Text('Settings'),
-          content: SingleChildScrollView(
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              sw('Sound effects', sound, (x) {
-                sound = x;
-                Sfx.enabled = x;
-              }, setD),
-              sw('On-screen joystick', joystick, (x) => joystick = x, setD),
-              sw('Show snake names', showNames, (x) => showNames = x, setD),
-              sw('Show leaderboard', showBoard, (x) => showBoard = x, setD),
-            ]),
-          ),
-          actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('OK'))],
-        ),
+        },
       ),
-    ).then((_) => _save());
+    );
   }
 
-  void _chooseMap() {
-    showDialog(
-      context: context,
-      builder: (_) => StatefulBuilder(
-        builder: (ctx, setD) => AlertDialog(
-          title: const Text('Choose Map'),
-          content: Column(mainAxisSize: MainAxisSize.min, children: [
-            for (int i = 0; i < mapSizes.length; i++)
-              ListTile(
-                title: Text('${mapNames[i]}  (${mapSizes[i].toInt()} x ${mapSizes[i].toInt()})'),
-                leading: Icon(mapChoice == i ? Icons.radio_button_checked : Icons.radio_button_off),
-                onTap: () {
-                  setState(() => mapChoice = i);
-                  setD(() {});
-                },
-              ),
-          ]),
-          actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('OK'))],
+  void _settingsSheet() {
+    _sheet('Settings', (setD) {
+      return [
+        _sw('Sound effects', Icons.volume_up, sound, (x) {
+          sound = x;
+          Sfx.enabled = x;
+        }, setD),
+        _sw('On-screen joystick', Icons.gamepad, joystick, (x) => joystick = x, setD),
+        _sw('Show snake names', Icons.badge_outlined, showNames, (x) => showNames = x, setD),
+        _sw('Show leaderboard', Icons.leaderboard, showBoard, (x) => showBoard = x, setD),
+        const SizedBox(height: 6),
+        OutlinedButton.icon(
+          style: OutlinedButton.styleFrom(foregroundColor: kPink, side: const BorderSide(color: kPink)),
+          onPressed: () {
+            setState(() {
+              bestScore = 0;
+              bestKills = 0;
+              lastScore = 0;
+              lastKills = 0;
+            });
+            _save();
+            setD(() {});
+          },
+          icon: const Icon(Icons.delete_outline),
+          label: const Text('Reset best score'),
         ),
-      ),
-    ).then((_) => _save());
+      ];
+    });
   }
 
   void _ptr(PointerEvent e) {
@@ -1171,70 +1354,109 @@ class JoyPainter extends CustomPainter {
   bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
 }
 
-class SunburstPainter extends CustomPainter {
+// ================================================================ home screen painters
+const kLime = Color(0xFF7CFF6B);
+const kCyan = Color(0xFF39E1FF);
+const kViolet = Color(0xFF8E5BFF);
+const kPink = Color(0xFFFF4FA3);
+
+class HomeBgPainter extends CustomPainter {
+  final ValueNotifier<double> clock;
+  HomeBgPainter(this.clock) : super(repaint: clock);
+
   @override
   void paint(Canvas canvas, Size size) {
+    final t = clock.value;
+    final w = size.width, h = size.height;
     final rect = Offset.zero & size;
-    final bg = Paint()
-      ..shader = const LinearGradient(
-        begin: Alignment.topCenter,
-        end: Alignment.bottomCenter,
-        colors: [Color(0xFF7DB2FF), Color(0xFF5B5FD8), Color(0xFF3B2AA5)],
-      ).createShader(rect);
-    canvas.drawRect(rect, bg);
 
-    final c = Offset(size.width / 2, size.height * 0.3);
-    final rays = Paint()..color = Colors.white.withOpacity(0.07);
-    const n = 24;
-    final R = size.longestSide * 1.5;
-    for (int i = 0; i < n; i += 2) {
-      final a0 = i * 2 * pi / n, a1 = (i + 1) * 2 * pi / n;
-      final path = Path()
-        ..moveTo(c.dx, c.dy)
-        ..lineTo(c.dx + R * cos(a0), c.dy + R * sin(a0))
-        ..lineTo(c.dx + R * cos(a1), c.dy + R * sin(a1))
-        ..close();
-      canvas.drawPath(path, rays);
+    canvas.drawRect(
+      rect,
+      Paint()
+        ..shader = const LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Color(0xFF0E0A24), Color(0xFF1A0F3D), Color(0xFF081A2B)],
+        ).createShader(rect),
+    );
+
+    // soft glowing blobs
+    const blobs = [
+      [0.15, 0.12, 0.55, 0xFF8E5BFF],
+      [0.90, 0.35, 0.50, 0xFF39E1FF],
+      [0.20, 0.70, 0.55, 0xFFFF4FA3],
+      [0.85, 0.92, 0.50, 0xFF7CFF6B],
+    ];
+    for (int i = 0; i < blobs.length; i++) {
+      final b = blobs[i];
+      final c = Offset(w * (b[0] + 0.05 * sin(t * 0.3 + i)), h * (b[1] + 0.04 * cos(t * 0.25 + i)));
+      final r = w * b[2];
+      final col = Color(b[3].toInt());
+      canvas.drawCircle(
+        c,
+        r,
+        Paint()
+          ..shader = RadialGradient(colors: [col.withOpacity(0.28), col.withOpacity(0)]).createShader(Rect.fromCircle(center: c, radius: r)),
+      );
+    }
+
+    // floating food
+    for (int i = 0; i < 16; i++) {
+      final bx = ((i * 0.137 + 0.06) % 1.0) * w;
+      final by = ((i * 0.291 + t * 0.012 * (0.6 + (i % 3) * 0.35)) % 1.0) * h;
+      final sz = 12.0 + (i % 4) * 5;
+      canvas.saveLayer(null, Paint()..color = Colors.white.withOpacity(0.28));
+      canvas.save();
+      canvas.translate(bx + sin(t * 0.6 + i) * 14, by);
+      canvas.rotate(t * 0.4 + i);
+      drawFood(canvas, i % foodTypes, Offset.zero, sz);
+      canvas.restore();
+      canvas.restore();
     }
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
 }
 
-class HomeSnakePainter extends CustomPainter {
+class SnakePreviewPainter extends CustomPainter {
+  final ValueNotifier<double> clock;
+  final int skin;
+  final Color color;
+  SnakePreviewPainter(this.clock, this.skin, this.color) : super(repaint: clock);
+
   @override
   void paint(Canvas canvas, Size size) {
+    final t = clock.value;
     final w = size.width, h = size.height;
+    const n = 28;
+    final spacing = w * 0.025;
+    final r = min(h * 0.2, 17.0);
+    final pts = <Offset>[];
+    for (int i = 0; i < n; i++) {
+      pts.add(Offset(w * 0.78 - i * spacing, h / 2 + sin(i * 0.38 - t * 3.2) * h * 0.17));
+    }
     final p = Paint();
-    Offset bez(double t) {
-      final u = 1 - t;
-      const a = Offset(.28, .08), b = Offset(1.05, 0.0), c = Offset(-.15, .6), d = Offset(.78, .82);
-      final o = a * (u * u * u) + b * (3 * u * u * t) + c * (3 * u * t * t) + d * (t * t * t);
-      return Offset(o.dx * w, o.dy * h);
+    for (int i = n - 1; i >= 0; i--) {
+      p.color = skinColor(skin, color, i, n);
+      canvas.drawCircle(pts[i], r * (1 - 0.45 * i / n) * (i == 0 ? 1.12 : 1), p);
     }
-
-    const n = 80;
-    for (int i = 0; i <= n; i++) {
-      final t = i / n;
-      final r = w * (0.03 + 0.125 * t);
-      p.color = (i ~/ 6).isEven ? const Color(0xFFFF9A2E) : const Color(0xFFFF8A1A);
-      canvas.drawCircle(bez(t), r, p);
-    }
-    final head = bez(1);
-    p.color = const Color(0xFFFFA43D);
-    canvas.drawCircle(head, w * 0.16, p);
-    for (final dx in [-0.02, 0.095]) {
-      final e = head + Offset(w * dx, -h * 0.01);
+    // eyes
+    final head = pts[0];
+    var dir = head - pts[2];
+    dir = dir / dir.distance;
+    final perp = Offset(-dir.dy, dir.dx);
+    for (final side in [-1.0, 1.0]) {
+      final e = head + dir * r * 0.45 + perp * r * 0.5 * side;
       p.color = Colors.white;
-      canvas.drawCircle(e, w * 0.06, p);
+      canvas.drawCircle(e, r * 0.36, p);
       p.color = Colors.black;
-      canvas.drawCircle(e + Offset(w * 0.006, w * 0.006), w * 0.04, p);
-      p.color = Colors.white;
-      canvas.drawCircle(e + Offset(-w * 0.004, -w * 0.006), w * 0.012, p);
+      canvas.drawCircle(e + dir * r * 0.12, r * 0.18, p);
     }
+    // a pizza to chase
+    drawFood(canvas, 0, Offset(w * 0.92, h / 2 + sin(t * 2.5) * 5), 12);
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
 }
