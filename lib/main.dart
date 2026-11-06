@@ -603,7 +603,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
                               shadows: [Shadow(color: kCyan.withOpacity(0.7), blurRadius: 26)])),
                       ShaderMask(
                         shaderCallback: (r) => const LinearGradient(colors: [kLime, kCyan]).createShader(r),
-                        child: const Text('Baba',
+                        child: const Text('FEAST',
                             style: TextStyle(color: Colors.white, fontSize: 58, height: 0.95, fontWeight: FontWeight.w900, letterSpacing: 10)),
                       ),
                     ]),
@@ -1032,8 +1032,8 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
           ),
         if (player.alive && joystick)
           Positioned(
-            left: 16,
-            bottom: 16,
+            left: 34,
+            bottom: 80,
             child: Listener(
               onPointerDown: _joyUpdate,
               onPointerMove: _joyUpdate,
@@ -1115,7 +1115,11 @@ void drawFood(Canvas canvas, int type, Offset pos, double r) {
       p.color = const Color(0xFF7CB342);
       canvas.drawRRect(RRect.fromRectAndRadius(const Rect.fromLTRB(-1.08, -0.08, 1.08, 0.16), const Radius.circular(0.12)), p);
       p.color = const Color(0xFFE8A33D);
-      canvas.drawArc(const Rect.fromLTRB(-1, -1, 1, 0.1), pi, pi, true, p);
+      final bun = Path()
+        ..moveTo(-1, 0.1)
+        ..cubicTo(-1, -1.3, 1, -1.3, 1, 0.1)
+        ..close();
+      canvas.drawPath(bun, p);
       p.color = Colors.white70;
       canvas.drawOval(Rect.fromCenter(center: const Offset(-0.4, -0.5), width: 0.18, height: 0.1), p);
       canvas.drawOval(Rect.fromCenter(center: const Offset(0.1, -0.65), width: 0.18, height: 0.1), p);
@@ -1195,7 +1199,10 @@ void drawPower(Canvas canvas, int type, Offset pos, double pulse) {
     p
       ..style = PaintingStyle.stroke
       ..strokeWidth = 0.4;
-    canvas.drawArc(Rect.fromCircle(center: const Offset(0, 0.1), radius: 0.55), 0, pi, false, p);
+    final u = Path()
+      ..moveTo(-0.55, 0.1)
+      ..cubicTo(-0.55, 0.833, 0.55, 0.833, 0.55, 0.1);
+    canvas.drawPath(u, p);
     canvas.drawLine(const Offset(-0.55, 0.1), const Offset(-0.55, -0.5), p);
     canvas.drawLine(const Offset(0.55, 0.1), const Offset(0.55, -0.5), p);
     p.color = const Color(0xFF263238);
@@ -1314,9 +1321,9 @@ class GamePainter extends CustomPainter {
     }
     canvas.restore();
 
-    // minimap (bottom center)
+    // minimap (right side, just above the BOOST button)
     const mm = 90.0;
-    final off = Offset((size.width - mm) / 2, size.height - mm - 16);
+    final off = Offset(size.width - mm - 16, size.height - mm - 124);
     paint.color = Colors.black45;
     canvas.drawRRect(RRect.fromRectAndRadius(Rect.fromLTWH(off.dx, off.dy, mm, mm), const Radius.circular(10)), paint);
     for (final s in g.snakes) {
