@@ -161,6 +161,7 @@ class Snake {
   bool remote = false, respawnReq = false, netBoost = false;
   double netTarget = 0;
   List<Offset>? net;
+  double aggr = 0.6; // > 0.5 means this bot hunts other snakes
 
   Snake({required this.isPlayer, required this.name, required this.color, required Offset start, this.skin = 0}) {
     reset(start);
@@ -170,6 +171,15 @@ class Snake {
   double get radius => 9 + min(len, 300) / 30;
   double get spacing => radius * 0.55;
   int get score => ((len - 12) * 10).floor();
+
+  // make the snake longer right away (used for the big starting snakes)
+  void grow(double l) {
+    len = l;
+    final dir = Offset(cos(angle), sin(angle));
+    while (body.length < len.floor()) {
+      body.add(body.last - dir * spacing);
+    }
+  }
 
   void reset(Offset start) {
     alive = true;
@@ -355,6 +365,26 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
           skin: rnd.nextInt(skinNames.length),
           start: randomPos()));
     }
+    // every bot gets a random aggression level; most of them hunt
+    for (int i = 1; i < snakes.length; i++) {
+      snakes[i].aggr = 0.3 + rnd.nextDouble() * 0.7;
+    }
+    // a few BIG snakes at the start only
+    const bigNames = ['Titan', 'Leviathan', 'Anaconda King', 'Basilisk'];
+    const bigSkins = [4, 3, 2, 1];
+    final bigCount = min(bots >= 25 ? 4 : 2, bots);
+    for (int i = 0; i < bigCount; i++) {
+      final big = snakes[1 + i];
+      Offset p;
+      do {
+        p = randomPos();
+      } while ((p - player.head).distance < 1200);
+      big.reset(p);
+      big.name = bigNames[i];
+      big.skin = bigSkins[i];
+      big.aggr = 1.0;
+      big.grow(150.0 + rnd.nextDouble() * 80);
+    }
     for (int i = 0; i < snakes.length; i++) {
       snakes[i].id = i;
     }
@@ -421,14 +451,34 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     s.aiTimer -= dt;
     final h = s.head;
     s.boosting = false;
+
+    // 1) stay inside the map
     if (h.dx < 200 || h.dx > worldSize - 200 || h.dy < 200 || h.dy > worldSize - 200) {
       s.target = atan2(worldSize / 2 - h.dy, worldSize / 2 - h.dx);
       return;
     }
+
+    // 2) hunters pick a prey: nearest snake (real players are preferred)
+    Snake? prey;
+    if (s.aggr > 0.5) {
+      double best = s.len > 100 ? 1100.0 : 750.0;
+      for (final o in snakes) {
+        if (o == s || !o.alive) continue;
+        if (o.len > s.len * 1.8 + 20) continue; // do not hunt much bigger snakes
+        var d = (o.head - h).distance;
+        if (o.isPlayer || o.remote) d *= 0.7;
+        if (d < best) {
+          best = d;
+          prey = o;
+        }
+      }
+    }
+
+    // 3) avoid crashing into bodies (the prey's head area is ignored while attacking)
     for (final o in snakes) {
       if (o == s || !o.alive) continue;
       if ((o.head - h).distance > 700) continue;
-      for (int i = 0; i < o.body.length; i += 3) {
+      for (int i = (o == prey ? 8 : 0); i < o.body.length; i += 3) {
         final p = o.body[i];
         final d = p - h;
         if (d.distance < s.radius + o.radius + 70) {
@@ -440,6 +490,27 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
         }
       }
     }
+
+    // 4) ATTACK: aim in front of the prey's head so it runs into our body
+    if (prey != null) {
+      final ph = prey.head;
+      final dist = (ph - h).distance;
+      final pdir = Offset(cos(prey.angle), sin(prey.angle));
+      final lead = (dist * 0.5).clamp(60.0, 260.0);
+      final aim = ph + pdir * lead;
+      var a = atan2(aim.dy - h.dy, aim.dx - h.dx);
+      if (dist < 100) {
+        // too close to the head: swing around instead of crashing head-on
+        final toHead = atan2(ph.dy - h.dy, ph.dx - h.dx);
+        final diff = wrapAngle(toHead - s.angle);
+        if (diff.abs() < 0.9) a = s.angle + (diff >= 0 ? -1.2 : 1.2);
+      }
+      s.target = a;
+      s.boosting = dist < 420 && s.len > 18 && wrapAngle(a - s.angle).abs() < 0.8;
+      return;
+    }
+
+    // 5) no prey: look for food
     if (s.aiTimer <= 0) {
       s.aiTimer = 0.4 + rnd.nextDouble() * 0.8;
       Food? bestFood;
@@ -473,6 +544,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
             s.reset(randomPos());
             s.skin = rnd.nextInt(skinNames.length);
             s.color = palette[rnd.nextInt(palette.length)];
+            s.aggr = 0.3 + rnd.nextDouble() * 0.7;
           }
         }
         continue;
