@@ -1,15 +1,23 @@
 // Slither-style game in Flutter
 // Packages needed:  flutter pub add audioplayers shared_preferences
+import 'dart:convert';
+import 'dart:io' show HttpServer, InternetAddress, InternetAddressType, NetworkInterface, WebSocket, WebSocketTransformer;
 import 'dart:math';
 import 'dart:typed_data';
 import 'package:audioplayers/audioplayers.dart';
+import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
+import 'package:google_mobile_ads/google_mobile_ads.dart' as gma;
 import 'package:shared_preferences/shared_preferences.dart';
 
-void main() => runApp(const MaterialApp(debugShowCheckedModeBanner: false, home: GamePage()));
+void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  AdService.init();
+  runApp(const MaterialApp(debugShowCheckedModeBanner: false, home: GamePage()));
+}
 
 // ================================================================ globals
 double worldSize = 5000;
@@ -22,6 +30,23 @@ const foodTypes = 5;
 const skinNames = ['Classic', 'Stripes', 'Rainbow', 'Zebra', 'Fire', 'Candy'];
 
 enum Screen { home, play }
+
+enum NetRole { none, host, client }
+
+const int kPort = 4040;
+
+class NetConn {
+  final WebSocket ws;
+  final Snake snake;
+  NetConn(this.ws, this.snake);
+}
+
+class MiniDot {
+  final Offset p;
+  final Color c;
+  final bool me;
+  MiniDot(this.p, this.c, this.me);
+}
 
 double wrapAngle(double d) {
   while (d > pi) d -= 2 * pi;
@@ -132,6 +157,10 @@ class Snake {
   double dropTimer = 0, aiTimer = 0, respawn = 0;
   double speedT = 0, magnetT = 0, shieldT = 0;
   int kills = 0;
+  int id = 0;
+  bool remote = false, respawnReq = false, netBoost = false;
+  double netTarget = 0;
+  List<Offset>? net;
 
   Snake({required this.isPlayer, required this.name, required this.color, required Offset start, this.skin = 0}) {
     reset(start);
@@ -187,6 +216,21 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   final FocusNode gameFocus = FocusNode();
   final TextEditingController nameCtrl = TextEditingController();
   final ValueNotifier<double> homeClock = ValueNotifier(0);
+  final TextEditingController ipCtrl = TextEditingController();
+
+  // multiplayer state
+  NetRole role = NetRole.none;
+  HttpServer? server;
+  WebSocket? clientWs;
+  final Map<int, NetConn> conns = {};
+  final Map<int, Snake> netSnakes = {};
+  List<List<dynamic>> netBoard = [];
+  List<MiniDot> netDots = [];
+  int nextId = 1, myNetId = -1;
+  double _sendAcc = 0, clientTarget = 0;
+  bool firstSnap = true, netBusy = false;
+  String hostIp = '';
+  String? netMsg;
   SharedPreferences? prefs;
 
   Screen screen = Screen.home;
@@ -238,6 +282,8 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
 
   @override
   void dispose() {
+    _leaveNet();
+    ipCtrl.dispose();
     ticker.dispose();
     gameFocus.dispose();
     nameCtrl.dispose();
@@ -260,6 +306,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
         sound = p.getBool('sound') ?? true;
         joystick = p.getBool('joystick') ?? false;
         nameCtrl.text = p.getString('name') ?? '';
+        ipCtrl.text = p.getString('lastIp') ?? '';
         Sfx.enabled = sound;
       });
     } catch (_) {}
@@ -279,11 +326,13 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       p.setBool('sound', sound);
       p.setBool('joystick', joystick);
       p.setString('name', nameCtrl.text.trim());
+      p.setString('lastIp', ipCtrl.text.trim());
     } catch (_) {}
   }
 
   // ---------------------------------------------------------------- game flow
-  void startGame(int bots) {
+  void startGame(int bots, {bool hosting = false}) {
+    if (!hosting) _leaveNet();
     botCount = bots;
     worldSize = mapSizes[mapChoice];
     final nick = nameCtrl.text.trim();
@@ -306,6 +355,11 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
           skin: rnd.nextInt(skinNames.length),
           start: randomPos()));
     }
+    for (int i = 0; i < snakes.length; i++) {
+      snakes[i].id = i;
+    }
+    nextId = snakes.length;
+    role = hosting ? NetRole.host : NetRole.none;
     foods.clear();
     while (foods.length < foodCount) {
       foods.add(newFood());
@@ -328,7 +382,12 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     final dt = ((t - last).inMicroseconds / 1e6).clamp(0.0, 0.05);
     last = t;
     if (screen == Screen.play) {
-      _update(dt);
+      if (role == NetRole.client) {
+        _clientUpdate(dt);
+      } else {
+        _update(dt);
+        if (role == NetRole.host) _hostBroadcast(dt);
+      }
       setState(() {});
     } else {
       homeClock.value = t.inMicroseconds / 1e6;
@@ -352,6 +411,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     if (s.isPlayer) {
       _recordPlayer();
       Sfx.die();
+      AdService.onGameOver();
     } else {
       s.respawn = 3;
     }
@@ -402,7 +462,12 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   void _update(double dt) {
     for (final s in snakes) {
       if (!s.alive) {
-        if (!s.isPlayer) {
+        if (s.remote) {
+          if (s.respawnReq) {
+            s.respawnReq = false;
+            s.reset(randomPos(worldSize * 0.2));
+          }
+        } else if (!s.isPlayer) {
           s.respawn -= dt;
           if (s.respawn <= 0) {
             s.reset(randomPos());
@@ -422,6 +487,9 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
           s.target = atan2(pointer.dy - size.height / 2, pointer.dx - size.width / 2);
         }
         s.boosting = boostHeld;
+      } else if (s.remote) {
+        s.target = s.netTarget;
+        s.boosting = s.netBoost;
       } else {
         _ai(s, dt);
       }
@@ -703,6 +771,25 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
                         ]),
                       ),
                     ),
+                    const SizedBox(height: 12),
+                    GestureDetector(
+                      onTap: _friendsSheet,
+                      child: Container(
+                        width: double.infinity,
+                        height: 50,
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(25),
+                          border: Border.all(color: kCyan, width: 2),
+                          color: kCyan.withOpacity(0.10),
+                        ),
+                        child: const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                          Icon(Icons.wifi, color: kCyan),
+                          SizedBox(width: 8),
+                          Text('PLAY WITH FRIENDS',
+                              style: TextStyle(color: kCyan, fontSize: 15, fontWeight: FontWeight.w800, letterSpacing: 1.5)),
+                        ]),
+                      ),
+                    ),
                     const SizedBox(height: 16),
                     // ---- stats
                     Row(children: [
@@ -721,6 +808,8 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
                         _dockItem(Icons.tune, kViolet, 'Settings', 'Sound & more', _settingsSheet),
                       ]),
                     ),
+                    const SizedBox(height: 10),
+                    const AdBanner(),
                     const SizedBox(height: 6),
                   ]),
                 ),
@@ -936,6 +1025,514 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     });
   }
 
+  // ================================================================ WiFi multiplayer (host = server)
+  void _toast(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  Future<String> _localIp() async {
+    try {
+      final ifs = await NetworkInterface.list(type: InternetAddressType.IPv4, includeLoopback: false);
+      final all = <String>[
+        for (final i in ifs)
+          for (final a in i.addresses) a.address
+      ];
+      for (final ip in all) {
+        if (ip.startsWith('192.168.')) return ip;
+      }
+      for (final ip in all) {
+        if (RegExp(r'^172\.(1[6-9]|2[0-9]|3[01])\.').hasMatch(ip)) return ip;
+      }
+      for (final ip in all) {
+        if (ip.startsWith('10.')) return ip;
+      }
+      return all.isNotEmpty ? all.first : 'unknown';
+    } catch (_) {
+      return 'unknown';
+    }
+  }
+
+  Future<void> _startHost() async {
+    HttpServer srv;
+    try {
+      srv = await HttpServer.bind(InternetAddress.anyIPv4, kPort);
+    } catch (e) {
+      _toast('Could not start the room: $e');
+      return;
+    }
+    hostIp = await _localIp();
+    startGame(10, hosting: true);
+    server = srv;
+    srv.listen((req) async {
+      try {
+        if (WebSocketTransformer.isUpgradeRequest(req)) {
+          final w = await WebSocketTransformer.upgrade(req);
+          _onClient(w);
+        } else {
+          req.response
+            ..statusCode = 200
+            ..write('Snake Feast room');
+          await req.response.close();
+        }
+      } catch (_) {}
+    });
+  }
+
+  void _onClient(WebSocket w) {
+    if (conns.length >= 6) {
+      w.close();
+      return;
+    }
+    NetConn? conn;
+    w.listen((data) {
+      try {
+        final m = jsonDecode(data as String) as Map<String, dynamic>;
+        final t = m['t'];
+        if (t == 'hi' && conn == null) {
+          final id = nextId++;
+          var nm = ((m['name'] as String?) ?? '').trim();
+          if (nm.length > 15) nm = nm.substring(0, 15);
+          if (nm.isEmpty) nm = 'Friend$id';
+          final s = Snake(
+            isPlayer: false,
+            name: nm,
+            color: Color(m['color'] as int),
+            skin: (m['skin'] as num).toInt().clamp(0, skinNames.length - 1),
+            start: randomPos(worldSize * 0.2),
+          );
+          s.id = id;
+          s.remote = true;
+          snakes.add(s);
+          conn = NetConn(w, s);
+          conns[id] = conn!;
+          w.add(jsonEncode({'t': 'w', 'id': id, 'world': worldSize}));
+        } else if (t == 'in' && conn != null) {
+          conn!.snake.netTarget = (m['a'] as num).toDouble();
+          conn!.snake.netBoost = m['b'] == 1;
+        } else if (t == 'respawn' && conn != null) {
+          conn!.snake.respawnReq = true;
+        }
+      } catch (_) {}
+    }, onDone: () => _dropClient(conn), onError: (_) => _dropClient(conn));
+  }
+
+  void _dropClient(NetConn? c) {
+    if (c == null) return;
+    if (conns.remove(c.snake.id) == null) return;
+    if (c.snake.alive) _kill(c.snake);
+    snakes.remove(c.snake);
+    if (mounted) setState(() {});
+  }
+
+  Map<String, dynamic> _snapshot(Snake me, List<dynamic> lb, List<dynamic> mm) {
+    final h = me.head;
+    final sn = <List<dynamic>>[];
+    for (final s in snakes) {
+      if (s != me) {
+        if (!s.alive) continue;
+        bool near = false;
+        for (int i = 0; i < s.body.length; i += 4) {
+          if ((s.body[i] - h).distance < 1500) {
+            near = true;
+            break;
+          }
+        }
+        if (!near) continue;
+      }
+      final pts = <int>[];
+      if (s.alive) {
+        for (final p in s.body) {
+          pts.add(p.dx.round());
+          pts.add(p.dy.round());
+        }
+      }
+      sn.add([
+        s.id,
+        s.name,
+        s.color.value,
+        s.skin,
+        s.alive ? 1 : 0,
+        double.parse(s.len.toStringAsFixed(1)),
+        s.kills,
+        double.parse(s.speedT.toStringAsFixed(1)),
+        double.parse(s.magnetT.toStringAsFixed(1)),
+        double.parse(s.shieldT.toStringAsFixed(1)),
+        s.boosting ? 1 : 0,
+        double.parse(s.angle.toStringAsFixed(2)),
+        pts,
+      ]);
+    }
+    final f = <List<num>>[];
+    for (final fd in foods) {
+      if ((fd.pos - h).distance < 1300) {
+        f.add([fd.pos.dx.round(), fd.pos.dy.round(), double.parse(fd.r.toStringAsFixed(1)), fd.type]);
+      }
+    }
+    final p = <List<num>>[];
+    for (final pu in powers) {
+      if ((pu.pos - h).distance < 1300) {
+        p.add([pu.pos.dx.round(), pu.pos.dy.round(), pu.type]);
+      }
+    }
+    return {'t': 's', 'me': me.id, 'sn': sn, 'f': f, 'p': p, 'lb': lb, 'mm': mm};
+  }
+
+  void _hostBroadcast(double dt) {
+    if (conns.isEmpty) return;
+    _sendAcc += dt;
+    if (_sendAcc < 0.05) return;
+    _sendAcc = 0;
+    final alive = snakes.where((s) => s.alive).toList();
+    final sorted = [...alive]..sort((a, b) => b.len.compareTo(a.len));
+    final lb = [
+      for (final s in sorted.take(8)) [s.name, s.score, s.id]
+    ];
+    final mm = [
+      for (final s in alive) [s.head.dx.round(), s.head.dy.round(), s.color.value, s.id]
+    ];
+    for (final c in conns.values.toList()) {
+      try {
+        c.ws.add(jsonEncode(_snapshot(c.snake, lb, mm)));
+      } catch (_) {}
+    }
+  }
+
+  Future<String?> _joinGame(String ipRaw) async {
+    final ip = ipRaw.trim();
+    if (ip.isEmpty) return 'Enter the host IP address first.';
+    try {
+      _leaveNet();
+      final w = await WebSocket.connect('ws://$ip:$kPort').timeout(const Duration(seconds: 5));
+      clientWs = w;
+      role = NetRole.client;
+      netSnakes.clear();
+      snakes.clear();
+      foods.clear();
+      powers.clear();
+      netBoard = [];
+      netDots = [];
+      firstSnap = true;
+      myNetId = -1;
+      hostIp = ip;
+      clientTarget = 0;
+      final nick = nameCtrl.text.trim();
+      player = Snake(
+        isPlayer: true,
+        name: nick.isEmpty ? 'You' : nick,
+        color: playerColor,
+        skin: skin,
+        start: const Offset(-9000, -9000),
+      );
+      cam = player.head;
+      w.add(jsonEncode({'t': 'hi', 'name': nick, 'color': playerColor.value, 'skin': skin}));
+      w.listen((data) {
+        try {
+          final m = jsonDecode(data as String) as Map<String, dynamic>;
+          if (m['t'] == 'w') {
+            myNetId = m['id'] as int;
+            worldSize = (m['world'] as num).toDouble();
+          } else if (m['t'] == 's') {
+            _onSnapshot(m);
+          }
+        } catch (_) {}
+      }, onDone: _hostLeft, onError: (_) => _hostLeft());
+      hasPointer = false;
+      boostHeld = false;
+      joyActive = false;
+      joy = Offset.zero;
+      _save();
+      setState(() => screen = Screen.play);
+      gameFocus.requestFocus();
+      return null;
+    } catch (e) {
+      role = NetRole.none;
+      clientWs = null;
+      return "Couldn't connect. Check the IP, and that both phones are on the same WiFi.";
+    }
+  }
+
+  void _onSnapshot(Map<String, dynamic> m) {
+    myNetId = m['me'] as int;
+    final seen = <int>{};
+    for (final e in (m['sn'] as List)) {
+      final id = e[0] as int;
+      seen.add(id);
+      final isMe = id == myNetId;
+      var s = netSnakes[id];
+      if (s == null) {
+        s = Snake(isPlayer: isMe, name: e[1] as String, color: Color(e[2] as int), skin: e[3] as int, start: Offset.zero);
+        s.id = id;
+        netSnakes[id] = s;
+      }
+      final wasAlive = s.alive;
+      final oldLen = s.len;
+      final oldKills = s.kills;
+      s.name = e[1] as String;
+      s.color = Color(e[2] as int);
+      s.skin = e[3] as int;
+      s.alive = e[4] == 1;
+      s.len = (e[5] as num).toDouble();
+      s.kills = e[6] as int;
+      s.speedT = (e[7] as num).toDouble();
+      s.magnetT = (e[8] as num).toDouble();
+      s.shieldT = (e[9] as num).toDouble();
+      s.boosting = e[10] == 1;
+      s.angle = (e[11] as num).toDouble();
+      final raw = e[12] as List;
+      if (raw.isNotEmpty) {
+        final net = <Offset>[];
+        for (int i = 0; i + 1 < raw.length; i += 2) {
+          net.add(Offset((raw[i] as num).toDouble(), (raw[i + 1] as num).toDouble()));
+        }
+        s.net = net;
+        if (s.body.length != net.length || (s.body.first - net.first).distance > 300) {
+          s.body
+            ..clear()
+            ..addAll(net);
+        }
+      }
+      if (isMe) {
+        player = s;
+        if (wasAlive && !s.alive) {
+          _recordPlayer();
+          Sfx.die();
+          AdService.onGameOver();
+        } else if (s.alive && s.len > oldLen + 0.05) {
+          Sfx.eat();
+        }
+        if (s.kills > oldKills) Sfx.kill();
+      }
+    }
+    netSnakes.removeWhere((id, _) => !seen.contains(id));
+    snakes
+      ..clear()
+      ..addAll(netSnakes.values);
+
+    foods
+      ..clear()
+      ..addAll((m['f'] as List).map((r) => Food(Offset((r[0] as num).toDouble(), (r[1] as num).toDouble()), (r[2] as num).toDouble(), r[3] as int)));
+    powers
+      ..clear()
+      ..addAll((m['p'] as List).map((r) => PowerUp(Offset((r[0] as num).toDouble(), (r[1] as num).toDouble()), r[2] as int)));
+    netBoard = (m['lb'] as List).map<List<dynamic>>((r) => [r[0], r[1], r[2] == myNetId]).toList();
+    netDots = (m['mm'] as List)
+        .map<MiniDot>((r) => MiniDot(Offset((r[0] as num).toDouble(), (r[1] as num).toDouble()), Color(r[2] as int), r[3] == myNetId))
+        .toList();
+  }
+
+  double? _steerTarget() {
+    if (joyActive && joy.distance > 8) return atan2(joy.dy, joy.dx);
+    if (hasPointer && size != Size.zero) return atan2(pointer.dy - size.height / 2, pointer.dx - size.width / 2);
+    return null;
+  }
+
+  void _clientUpdate(double dt) {
+    final k = min(1.0, dt * 14);
+    for (final s in snakes) {
+      final n = s.net;
+      if (n == null || n.isEmpty) continue;
+      if (s.body.length != n.length) {
+        s.body
+          ..clear()
+          ..addAll(n);
+      } else {
+        for (int i = 0; i < n.length; i++) {
+          s.body[i] = Offset.lerp(s.body[i], n[i], k)!;
+        }
+      }
+    }
+    if (player.alive && player.body.isNotEmpty && snakes.contains(player)) {
+      if (firstSnap) {
+        cam = player.head;
+        firstSnap = false;
+      } else {
+        cam = cam + (player.head - cam) * min(1.0, dt * 8);
+      }
+    }
+    final t = _steerTarget();
+    if (t != null) clientTarget = t;
+    _sendAcc += dt;
+    if (_sendAcc >= 0.05) {
+      _sendAcc = 0;
+      try {
+        clientWs?.add(jsonEncode({'t': 'in', 'a': double.parse(clientTarget.toStringAsFixed(2)), 'b': boostHeld ? 1 : 0}));
+      } catch (_) {}
+    }
+  }
+
+  void _hostLeft() {
+    if (role != NetRole.client) return;
+    _leaveNet();
+    if (!mounted) return;
+    setState(() => screen = Screen.home);
+    _toast('The host left the game.');
+  }
+
+  void _leaveNet() {
+    for (final c in conns.values) {
+      try {
+        c.ws.close();
+      } catch (_) {}
+    }
+    conns.clear();
+    try {
+      server?.close(force: true);
+    } catch (_) {}
+    server = null;
+    final w = clientWs;
+    clientWs = null;
+    role = NetRole.none;
+    try {
+      w?.close();
+    } catch (_) {}
+    netSnakes.clear();
+  }
+
+  void _revive() {
+    if (!mounted || role == NetRole.client) return;
+    setState(() {
+      player.reset(randomPos(worldSize * 0.2));
+      player.len = 40; // reward: start longer
+      player.shieldT = 5; // reward: 5 seconds of shield
+      cam = player.head;
+    });
+  }
+
+  void _playAgain() {
+    if (role == NetRole.client) {
+      try {
+        clientWs?.add(jsonEncode({'t': 'respawn'}));
+      } catch (_) {}
+    } else if (role == NetRole.host) {
+      player.reset(randomPos(worldSize * 0.2));
+      cam = player.head;
+    } else {
+      startGame(botCount);
+    }
+  }
+
+  List<MiniDot> mmDots() {
+    if (role == NetRole.client) return netDots;
+    return [
+      for (final s in snakes)
+        if (s.alive) MiniDot(s.head, s.color, s.isPlayer)
+    ];
+  }
+
+  // ---------------------------------------------------------------- friends sheet
+  void _friendsSheet() {
+    netMsg = null;
+    netBusy = false;
+    _sheet('Play with Friends', (setD) {
+      if (kIsWeb) {
+        return [
+          _glass(
+              child: const Text('WiFi play needs the Android / iOS / Windows app. It does not work inside a web browser.',
+                  style: TextStyle(color: Colors.white70))),
+        ];
+      }
+      return [
+        _glass(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Row(children: [
+              Icon(Icons.wifi_tethering, color: kLime),
+              SizedBox(width: 8),
+              Text('Host a game', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w800)),
+            ]),
+            const SizedBox(height: 8),
+            const Text('Your phone creates the room. Friends on the same WiFi (or your hotspot) join using your IP address, which shows at the top of the game screen.',
+                style: TextStyle(color: Colors.white60, fontSize: 13)),
+            const SizedBox(height: 12),
+            GestureDetector(
+              onTap: () {
+                Navigator.of(context).pop();
+                _startHost();
+              },
+              child: Container(
+                height: 48,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(24),
+                  gradient: const LinearGradient(colors: [kLime, Color(0xFF1DE9B6)]),
+                ),
+                child: const Text('START HOSTING',
+                    style: TextStyle(color: Color(0xFF0B2A12), fontWeight: FontWeight.w900, letterSpacing: 2)),
+              ),
+            ),
+          ]),
+        ),
+        const SizedBox(height: 12),
+        _glass(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Row(children: [
+              Icon(Icons.login, color: kCyan),
+              SizedBox(width: 8),
+              Text('Join a game', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w800)),
+            ]),
+            const SizedBox(height: 10),
+            TextField(
+              controller: ipCtrl,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              style: const TextStyle(color: Colors.white, fontSize: 18),
+              decoration: InputDecoration(
+                hintText: 'Host IP  e.g. 192.168.1.5',
+                hintStyle: const TextStyle(color: Colors.white38),
+                prefixIcon: const Icon(Icons.dns_outlined, color: Colors.white38),
+                filled: true,
+                fillColor: Colors.white.withOpacity(0.07),
+                contentPadding: const EdgeInsets.symmetric(vertical: 12),
+                enabledBorder:
+                OutlineInputBorder(borderRadius: BorderRadius.circular(26), borderSide: const BorderSide(color: Colors.white24)),
+                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(26), borderSide: const BorderSide(color: kCyan, width: 2)),
+              ),
+            ),
+            if (netMsg != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(netMsg!, style: const TextStyle(color: kPink, fontSize: 13)),
+              ),
+            const SizedBox(height: 12),
+            GestureDetector(
+              onTap: netBusy
+                  ? null
+                  : () async {
+                setD(() {
+                  netBusy = true;
+                  netMsg = null;
+                });
+                final err = await _joinGame(ipCtrl.text);
+                if (!mounted) return;
+                if (err != null) {
+                  setD(() {
+                    netBusy = false;
+                    netMsg = err;
+                  });
+                } else {
+                  netBusy = false;
+                  Navigator.of(context).pop();
+                }
+              },
+              child: Container(
+                height: 48,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(24),
+                  color: kCyan.withOpacity(netBusy ? 0.4 : 1),
+                ),
+                child: Text(netBusy ? 'CONNECTING...' : 'JOIN',
+                    style: const TextStyle(color: Color(0xFF06222B), fontWeight: FontWeight.w900, letterSpacing: 2)),
+              ),
+            ),
+          ]),
+        ),
+        const SizedBox(height: 14),
+        const Text('Tip: both phones must be on the same WiFi. If it does not connect, turn on one phone\'s hotspot and connect the other phone to it.',
+            style: TextStyle(color: Colors.white54, fontSize: 12)),
+      ];
+    });
+  }
+
   void _ptr(PointerEvent e) {
     if (e.kind == PointerDeviceKind.touch) {
       if (!joystick) {
@@ -972,7 +1569,12 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   );
 
   Widget _game() {
-    final board = (snakes.where((s) => s.alive).toList()..sort((a, b) => b.len.compareTo(a.len))).take(8).toList();
+    final List<List<dynamic>> board = role == NetRole.client
+        ? netBoard
+        : (snakes.where((s) => s.alive).toList()..sort((a, b) => b.len.compareTo(a.len)))
+        .take(8)
+        .map<List<dynamic>>((s) => [s.name, s.score, s.isPlayer])
+        .toList();
     return LayoutBuilder(builder: (context, c) {
       size = Size(c.maxWidth, c.maxHeight);
       return Stack(children: [
@@ -998,6 +1600,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
                   icon: const Icon(Icons.home, color: Colors.white),
                   onPressed: () {
                     if (player.alive) _recordPlayer();
+                    _leaveNet();
                     setState(() => screen = Screen.home);
                   }),
               Text('Score: ${player.score}   Kills: ${player.kills}',
@@ -1017,6 +1620,27 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
               ]),
             ),
           ),
+        if (role != NetRole.none)
+          Positioned(
+            left: 16,
+            top: 104,
+            child: SafeArea(
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  color: Colors.black54,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: kCyan.withOpacity(0.6)),
+                ),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  const Icon(Icons.wifi, size: 14, color: kCyan),
+                  const SizedBox(width: 6),
+                  Text(role == NetRole.host ? 'Room IP: $hostIp  •  ${conns.length + 1} players' : 'Connected to $hostIp',
+                      style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600)),
+                ]),
+              ),
+            ),
+          ),
         if (showBoard)
           Positioned(
             right: 16,
@@ -1024,9 +1648,9 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
             child: SafeArea(
               child: Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
                 const Text('Leaderboard', style: TextStyle(color: Colors.white70, fontWeight: FontWeight.bold)),
-                for (final s in board)
-                  Text('${s.name}  ${s.score}',
-                      style: TextStyle(color: s.isPlayer ? Colors.greenAccent : Colors.white, fontSize: 13)),
+                for (final r in board)
+                  Text('${r[0]}  ${r[1]}',
+                      style: TextStyle(color: r[2] == true ? Colors.greenAccent : Colors.white, fontSize: 13)),
               ]),
             ),
           ),
@@ -1070,10 +1694,24 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
                 Text('Score: $lastScore    Kills: $lastKills', style: const TextStyle(color: Colors.white, fontSize: 18)),
                 Text('Best: $bestScore', style: const TextStyle(color: Colors.amber, fontSize: 16)),
                 const SizedBox(height: 16),
+                if (AdService.supported && role != NetRole.client && AdService.rewardAvailable) ...[
+                  ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.amber, foregroundColor: Colors.black),
+                    onPressed: () => AdService.showReward(_revive),
+                    icon: const Icon(Icons.ondemand_video),
+                    label: const Text('WATCH AD  •  REVIVE'),
+                  ),
+                  const SizedBox(height: 10),
+                ],
                 Row(mainAxisSize: MainAxisSize.min, children: [
-                  ElevatedButton(onPressed: () => startGame(botCount), child: const Text('PLAY AGAIN')),
+                  ElevatedButton(onPressed: _playAgain, child: const Text('PLAY AGAIN')),
                   const SizedBox(width: 12),
-                  OutlinedButton(onPressed: () => setState(() => screen = Screen.home), child: const Text('HOME')),
+                  OutlinedButton(
+                      onPressed: () {
+                        _leaveNet();
+                        setState(() => screen = Screen.home);
+                      },
+                      child: const Text('HOME')),
                 ]),
               ]),
             ),
@@ -1326,11 +1964,10 @@ class GamePainter extends CustomPainter {
     final off = Offset(size.width - mm - 16, size.height - mm - 124);
     paint.color = Colors.black45;
     canvas.drawRRect(RRect.fromRectAndRadius(Rect.fromLTWH(off.dx, off.dy, mm, mm), const Radius.circular(10)), paint);
-    for (final s in g.snakes) {
-      if (!s.alive) continue;
-      final p = off + Offset(s.head.dx / worldSize * mm, s.head.dy / worldSize * mm);
-      paint.color = s.isPlayer ? Colors.white : s.color.withOpacity(0.8);
-      canvas.drawCircle(p, s.isPlayer ? 4 : 2, paint);
+    for (final d in g.mmDots()) {
+      final p = off + Offset(d.p.dx / worldSize * mm, d.p.dy / worldSize * mm);
+      paint.color = d.me ? Colors.white : d.c.withOpacity(0.8);
+      canvas.drawCircle(p, d.me ? 4 : 2, paint);
     }
   }
 
@@ -1466,4 +2103,138 @@ class SnakePreviewPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
+}
+
+
+// ================================================================ ADS (Google AdMob)
+// These are Google's TEST ad ids. Replace them with YOUR AdMob ad unit ids before publishing.
+class AdService {
+  static const bannerId = 'ca-app-pub-3940256099942544/6300978111';
+  static const interstitialId = 'ca-app-pub-3940256099942544/1033173712';
+  static const rewardedId = 'ca-app-pub-3940256099942544/5224354917';
+
+  // ads are enabled on Android only (iOS needs its own ids)
+  static bool get supported => !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+
+  static gma.InterstitialAd? _inter;
+  static gma.RewardedAd? _reward;
+  static int _deaths = 0;
+
+  static bool get rewardAvailable => _reward != null;
+
+  static Future<void> init() async {
+    if (!supported) return;
+    try {
+      await gma.MobileAds.instance.initialize();
+      _loadInterstitial();
+      _loadRewarded();
+    } catch (_) {}
+  }
+
+  static void _loadInterstitial() {
+    gma.InterstitialAd.load(
+      adUnitId: interstitialId,
+      request: const gma.AdRequest(),
+      adLoadCallback: gma.InterstitialAdLoadCallback(
+        onAdLoaded: (ad) => _inter = ad,
+        onAdFailedToLoad: (_) => _inter = null,
+      ),
+    );
+  }
+
+  static void _loadRewarded() {
+    gma.RewardedAd.load(
+      adUnitId: rewardedId,
+      request: const gma.AdRequest(),
+      rewardedAdLoadCallback: gma.RewardedAdLoadCallback(
+        onAdLoaded: (ad) => _reward = ad,
+        onAdFailedToLoad: (_) => _reward = null,
+      ),
+    );
+  }
+
+  /// Call when a game ends. Shows a full-screen ad on every 3rd game over.
+  static void onGameOver() {
+    if (!supported) return;
+    _deaths++;
+    if (_deaths % 3 != 0) return;
+    Future.delayed(const Duration(milliseconds: 1200), () {
+      final ad = _inter;
+      if (ad == null) return;
+      _inter = null;
+      ad.fullScreenContentCallback = gma.FullScreenContentCallback(
+        onAdDismissedFullScreenContent: (a) {
+          a.dispose();
+          _loadInterstitial();
+        },
+        onAdFailedToShowFullScreenContent: (a, _) {
+          a.dispose();
+          _loadInterstitial();
+        },
+      );
+      ad.show();
+    });
+  }
+
+  /// Shows a rewarded video; [onReward] runs only if the player watched it.
+  static void showReward(void Function() onReward) {
+    final ad = _reward;
+    if (ad == null) return;
+    _reward = null;
+    ad.fullScreenContentCallback = gma.FullScreenContentCallback(
+      onAdDismissedFullScreenContent: (a) {
+        a.dispose();
+        _loadRewarded();
+      },
+      onAdFailedToShowFullScreenContent: (a, _) {
+        a.dispose();
+        _loadRewarded();
+      },
+    );
+    ad.show(onUserEarnedReward: (view, reward) => onReward());
+  }
+}
+
+class AdBanner extends StatefulWidget {
+  const AdBanner({super.key});
+  @override
+  State<AdBanner> createState() => _AdBannerState();
+}
+
+class _AdBannerState extends State<AdBanner> {
+  gma.BannerAd? _ad;
+  bool _loaded = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (!AdService.supported) return;
+    _ad = gma.BannerAd(
+      adUnitId: AdService.bannerId,
+      size: gma.AdSize.banner,
+      request: const gma.AdRequest(),
+      listener: gma.BannerAdListener(
+        onAdLoaded: (_) {
+          if (mounted) setState(() => _loaded = true);
+        },
+        onAdFailedToLoad: (ad, _) {
+          ad.dispose();
+          _ad = null;
+        },
+      ),
+    )..load();
+  }
+
+  @override
+  void dispose() {
+    _ad?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ad = _ad;
+    if (!_loaded || ad == null) return const SizedBox.shrink();
+    return SizedBox(width: 320, height: 50, child: gma.AdWidget(ad: ad));
+  }
 }
