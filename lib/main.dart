@@ -424,6 +424,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       big.skin = bigSkins[i];
       big.aggr = 1.0;
       big.grow(150.0 + rnd.nextDouble() * 80);
+      big.shieldT = 15; // protected for the first 15 seconds
     }
     for (int i = 0; i < snakes.length; i++) {
       snakes[i].id = i;
@@ -493,7 +494,8 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     s.boosting = false;
 
     // 1) stay inside the map
-    if (h.dx < 200 || h.dx > worldSize - 200 || h.dy < 200 || h.dy > worldSize - 200) {
+    final edge = 200 + s.radius * 3;
+    if (h.dx < edge || h.dx > worldSize - edge || h.dy < edge || h.dy > worldSize - edge) {
       s.target = atan2(worldSize / 2 - h.dy, worldSize / 2 - h.dx);
       return;
     }
@@ -507,10 +509,13 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
         if (o == s || !o.alive) continue;
         final human = o.isPlayer || o.remote;
         if (!human && o.len > s.len * 1.8 + 20) continue; // bots avoid much bigger bots
+        if (!human && o.len < s.len * 0.4) continue; // big bots do not chase tiny snakes (too risky)
+        if (!human && s.len < 25) continue; // tiny bots first grow by eating
         final d = (o.head - h).distance;
         // real players are chased from very far away
         final maxRange = human ? (s.len > 100 ? chaseRange * 1.3 : chaseRange) : 700.0;
         if (d > maxRange) continue;
+        if (s.len < 25 && d > 500) continue; // tiny bots only chase a player who is close
         final score = human ? d * 0.5 : d;
         if (score < best) {
           best = score;
@@ -526,7 +531,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       for (int i = (o == prey ? 8 : 0); i < o.body.length; i += 3) {
         final p = o.body[i];
         final d = p - h;
-        if (d.distance < s.radius + o.radius + 70) {
+        if (d.distance < s.radius + o.radius + 70 + min(s.len, 300.0) * 0.25) {
           final toP = atan2(d.dy, d.dx);
           if (wrapAngle(toP - s.angle).abs() < 1.6) {
             s.target = toP + (wrapAngle(toP - s.angle) >= 0 ? -1.3 : 1.3);
@@ -592,6 +597,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
             s.skin = rnd.nextInt(skinNames.length);
             s.color = palette[rnd.nextInt(palette.length)];
             s.aggr = newAggr();
+            s.shieldT = 3;
           }
         }
         continue;
@@ -664,7 +670,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
         for (final o in snakes) {
           if (o == s || !o.alive) continue;
           if ((o.head - h).distance > o.body.length * o.spacing + 100) continue;
-          final limit = s.radius * 0.7 + o.radius * 0.8;
+          final limit = min(s.radius * 0.7, 10.0) + o.radius * 0.8;
           for (final p in o.body) {
             if ((p - h).distance < limit) {
               dead = true;
