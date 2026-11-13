@@ -10,6 +10,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_tts/flutter_tts.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart' as gma;
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -27,7 +28,7 @@ final Random rnd = Random();
 
 // food types: 0 pizza, 1 bun, 2 kheera, 3 onion, 4 cold drink
 const foodTypes = 5;
-const skinNames = ['Classic', 'Stripes', 'Rainbow', 'Zebra', 'Fire', 'Candy'];
+const skinNames = ['Classic', 'Banded', 'Rainbow', 'Zebra', 'Fire', 'Candy', 'Rust', 'Ocean'];
 
 enum Screen { home, play }
 
@@ -66,6 +67,11 @@ Color skinColor(int skin, Color base, int i, int n) {
       return Color.lerp(const Color(0xFFFFEB3B), const Color(0xFFD50000), (i / max(n - 1, 1)).clamp(0.0, 1.0))!;
     case 5:
       return (i ~/ 2).isEven ? const Color(0xFFFF6FA5) : Colors.white;
+    case 6: // centipede
+      if (i == 0) return const Color(0xFF8B2E12);
+      return i.isEven ? const Color(0xFFB5541C) : const Color(0xFFE08A2E);
+    case 7: // ocean
+      return Color.lerp(const Color(0xFF00E5FF), const Color(0xFF283593), 0.5 + 0.5 * sin(i * 0.4))!;
     default:
       return i.isEven ? base : Color.lerp(Colors.black, base, 0.82)!;
   }
@@ -127,7 +133,28 @@ class Sfx {
     _play(_a, _eat);
   }
 
-  static void die() => _play(_b, _die);
+  static final FlutterTts _tts = FlutterTts();
+  static bool _ttsReady = false;
+
+  // plays a loud "ui maa!" voice after you die
+  static Future<void> _voice() async {
+    if (!enabled) return;
+    try {
+      if (!_ttsReady) {
+        _ttsReady = true;
+        await _tts.setLanguage('hi-IN');
+        await _tts.setVolume(1.0);
+        await _tts.setPitch(1.5);
+        await _tts.setSpeechRate(0.45);
+      }
+      await _tts.speak('उई माँ!');
+    } catch (_) {}
+  }
+
+  static void die() {
+    _play(_b, _die);
+    _voice();
+  }
   static void kill() => _play(_c, _kill);
   static void power() => _play(_d, _power);
 }
@@ -162,13 +189,14 @@ class Snake {
   double netTarget = 0;
   List<Offset>? net;
   double aggr = 0.6; // > 0.5 means this bot hunts other snakes
+  double speedMul = 1.0;
 
   Snake({required this.isPlayer, required this.name, required this.color, required Offset start, this.skin = 0}) {
     reset(start);
   }
 
   Offset get head => body.first;
-  double get radius => 9 + min(len, 300) / 30;
+  double get radius => 10 + min(len, 700) / 20;
   double get spacing => radius * 0.55;
   int get score => ((len - 12) * 10).floor();
 
@@ -200,7 +228,7 @@ class Snake {
     final diff = wrapAngle(target - angle);
     final maxTurn = 4.2 * dt;
     angle += diff.clamp(-maxTurn, maxTurn);
-    final sp = (boosting ? 300.0 : 170.0) * (speedT > 0 ? 1.3 : 1.0);
+    final sp = (boosting ? 300.0 : 170.0) * (speedT > 0 ? 1.3 : 1.0) * speedMul;
     body[0] = body[0] + Offset(cos(angle), sin(angle)) * sp * dt;
     final sc = spacing;
     for (int i = 1; i < body.length; i++) {
@@ -367,7 +395,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     }
     // every bot gets a random aggression level; most of them hunt
     for (int i = 1; i < snakes.length; i++) {
-      snakes[i].aggr = 0.3 + rnd.nextDouble() * 0.7;
+      snakes[i].aggr = 0.4 + rnd.nextDouble() * 0.6;
     }
     // a few BIG snakes at the start only
     const bigNames = ['Titan', 'Leviathan', 'Anaconda King', 'Basilisk'];
@@ -460,15 +488,20 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
 
     // 2) hunters pick a prey: nearest snake (real players are preferred)
     Snake? prey;
+    s.speedMul = 1.0;
     if (s.aggr > 0.5) {
-      double best = s.len > 100 ? 1100.0 : 750.0;
+      double best = 1e9;
       for (final o in snakes) {
         if (o == s || !o.alive) continue;
-        if (o.len > s.len * 1.8 + 20) continue; // do not hunt much bigger snakes
-        var d = (o.head - h).distance;
-        if (o.isPlayer || o.remote) d *= 0.7;
-        if (d < best) {
-          best = d;
+        final human = o.isPlayer || o.remote;
+        if (!human && o.len > s.len * 1.8 + 20) continue; // bots avoid much bigger bots
+        final d = (o.head - h).distance;
+        // real players are chased from very far away
+        final maxRange = human ? (s.len > 100 ? 3200.0 : 2400.0) : 700.0;
+        if (d > maxRange) continue;
+        final score = human ? d * 0.5 : d;
+        if (score < best) {
+          best = score;
           prey = o;
         }
       }
@@ -506,7 +539,9 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
         if (diff.abs() < 0.9) a = s.angle + (diff >= 0 ? -1.2 : 1.2);
       }
       s.target = a;
-      s.boosting = dist < 420 && s.len > 18 && wrapAngle(a - s.angle).abs() < 0.8;
+      final human = prey.isPlayer || prey.remote;
+      if (human && dist > 450) s.speedMul = 1.12; // a little faster when running down a player
+      s.boosting = ((dist < 420 && s.len > 18) || (human && dist < 1500 && s.len > 30)) && wrapAngle(a - s.angle).abs() < 0.8;
       return;
     }
 
@@ -544,7 +579,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
             s.reset(randomPos());
             s.skin = rnd.nextInt(skinNames.length);
             s.color = palette[rnd.nextInt(palette.length)];
-            s.aggr = 0.3 + rnd.nextDouble() * 0.7;
+            s.aggr = 0.4 + rnd.nextDouble() * 0.6;
           }
         }
         continue;
@@ -733,14 +768,17 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
                       const Text('EAT  •  GROW  •  SURVIVE',
                           style: TextStyle(color: kCyan, fontSize: 12, letterSpacing: 4, fontWeight: FontWeight.w700)),
                       const SizedBox(height: 6),
-                      Text('SNAKE',
-                          style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 58,
-                              height: 1.0,
-                              fontWeight: FontWeight.w900,
-                              letterSpacing: 6,
-                              shadows: [Shadow(color: kCyan.withOpacity(0.7), blurRadius: 26)])),
+                      FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Text('CENTIPEDE',
+                            style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 50,
+                                height: 1.0,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: 4,
+                                shadows: [Shadow(color: kCyan.withOpacity(0.7), blurRadius: 26)])),
+                      ),
                       ShaderMask(
                         shaderCallback: (r) => const LinearGradient(colors: [kLime, kCyan]).createShader(r),
                         child: const Text('FEAST',
@@ -933,7 +971,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   );
 
   void _skinSheet() {
-    _sheet('Your Snake', (setD) {
+    _sheet('Your Centipede', (setD) {
       final tw = (min(MediaQuery.of(context).size.width, 520) - 52) / 2;
       return [
         Container(
@@ -1075,7 +1113,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
           Sfx.enabled = x;
         }, setD),
         _sw('On-screen joystick', Icons.gamepad, joystick, (x) => joystick = x, setD),
-        _sw('Show snake names', Icons.badge_outlined, showNames, (x) => showNames = x, setD),
+        _sw('Show names', Icons.badge_outlined, showNames, (x) => showNames = x, setD),
         _sw('Show leaderboard', Icons.leaderboard, showBoard, (x) => showBoard = x, setD),
         const SizedBox(height: 6),
         OutlinedButton.icon(
@@ -1939,7 +1977,7 @@ class GamePainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final paint = Paint();
     final base = (size.shortestSide / 700).clamp(0.6, 1.6);
-    final scale = base * (1 - min(g.player.len, 400) / 400 * 0.35);
+    final scale = base * (1 - min(g.player.len, 700) / 700 * 0.45);
     final cam = g.cam;
 
     paint.color = const Color(0xFF07070F);
@@ -1996,12 +2034,21 @@ class GamePainter extends CustomPainter {
       if (!s.alive) continue;
       final r = s.radius;
       final n = s.body.length;
+      drawCentipedeLegs(canvas, s.body, r, DateTime.now().millisecondsSinceEpoch / 1000.0,
+          view: view, legColor: Color.lerp(s.color, Colors.black, 0.55));
       for (int i = n - 1; i >= 0; i--) {
         final p = s.body[i];
         if (!view.contains(p)) continue;
         paint.color = skinColor(s.skin, s.color, i, n);
         if (s.boosting || s.speedT > 0) paint.color = Color.lerp(paint.color, Colors.white, 0.25)!;
         canvas.drawCircle(p, r, paint);
+        final fill = paint.color;
+        paint
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = max(1.5, r * 0.12)
+          ..color = Color.lerp(fill, Colors.black, 0.45)!;
+        canvas.drawCircle(p, r, paint);
+        paint.style = PaintingStyle.fill;
       }
       final h = s.head;
       final dir = Offset(cos(s.angle), sin(s.angle));
@@ -2153,9 +2200,18 @@ class SnakePreviewPainter extends CustomPainter {
       pts.add(Offset(w * 0.78 - i * spacing, h / 2 + sin(i * 0.38 - t * 3.2) * h * 0.17));
     }
     final p = Paint();
+    drawCentipedeLegs(canvas, pts, r * 0.8, t, legColor: Color.lerp(color, Colors.black, 0.55));
     for (int i = n - 1; i >= 0; i--) {
       p.color = skinColor(skin, color, i, n);
-      canvas.drawCircle(pts[i], r * (1 - 0.45 * i / n) * (i == 0 ? 1.12 : 1), p);
+      final rad = r * (1 - 0.45 * i / n) * (i == 0 ? 1.12 : 1);
+      canvas.drawCircle(pts[i], rad, p);
+      final fill = p.color;
+      p
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = max(1.2, rad * 0.12)
+        ..color = Color.lerp(fill, Colors.black, 0.45)!;
+      canvas.drawCircle(pts[i], rad, p);
+      p.style = PaintingStyle.fill;
     }
     // eyes
     final head = pts[0];
@@ -2308,5 +2364,52 @@ class _AdBannerState extends State<AdBanner> {
     final ad = _ad;
     if (!_loaded || ad == null) return const SizedBox.shrink();
     return SizedBox(width: 320, height: 50, child: gma.AdWidget(ad: ad));
+  }
+}
+
+
+// ================================================================ centipede skin (legs + antennae)
+void drawCentipedeLegs(Canvas canvas, List<Offset> pts, double r, double t, {Rect? view, Color? legColor}) {
+  if (pts.length < 3) return;
+  final p = Paint()
+    ..style = PaintingStyle.stroke
+    ..strokeCap = StrokeCap.round
+    ..strokeWidth = max(2.0, r * 0.22)
+    ..color = legColor ?? const Color(0xFF5A2A0B);
+  final foot = Paint()..color = Color.lerp(legColor ?? const Color(0xFF5A2A0B), Colors.black, 0.4)!;
+  for (int i = 1; i < pts.length - 1; i += 2) {
+    final c = pts[i];
+    if (view != null && !view.contains(c)) continue;
+    var d = pts[i - 1] - pts[i + 1];
+    final dl = d.distance;
+    if (dl < 0.001) continue;
+    d = d / dl;
+    final perp = Offset(-d.dy, d.dx);
+    final swing = sin(t * 9 + i * 0.7) * r * 0.5;
+    for (final side in [-1.0, 1.0]) {
+      final start = c + perp * side * r * 0.5;
+      final tip = c + perp * side * r * 1.75 + d * swing * side;
+      canvas.drawLine(start, tip, p);
+      canvas.drawCircle(tip, p.strokeWidth * 0.7, foot);
+    }
+  }
+  // antennae
+  var hd = pts[0] - pts[2];
+  final hl = hd.distance;
+  if (hl > 0.001) {
+    hd = hd / hl;
+    final hp = Offset(-hd.dy, hd.dx);
+    for (final side in [-1.0, 1.0]) {
+      canvas.drawLine(pts[0] + hd * r * 0.8 + hp * side * r * 0.3, pts[0] + hd * r * 2.0 + hp * side * r * 0.9, p);
+    }
+    // pincers
+    final fang = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeWidth = max(2.5, r * 0.3)
+      ..color = p.color;
+    for (final side in [-1.0, 1.0]) {
+      canvas.drawLine(pts[0] + hd * r * 0.85 + hp * side * r * 0.45, pts[0] + hd * r * 1.5 + hp * side * r * 0.12, fang);
+    }
   }
 }
