@@ -34,6 +34,16 @@ enum Screen { home, play }
 
 enum NetRole { none, host, client }
 
+// ---- difficulty: 0 = Easy, 1 = Medium, 2 = Hard
+int difficulty = 1;
+const diffNames = ['Easy', 'Medium', 'Hard'];
+double get huntShare => const [0.25, 0.55, 0.85][difficulty]; // fraction of bots that hunt
+double get chaseRange => const [800.0, 1600.0, 2600.0][difficulty]; // how far bots spot a player
+double get chaseSpeed => const [1.0, 1.05, 1.12][difficulty]; // bot speed while chasing a player
+double get boostNear => const [250.0, 420.0, 420.0][difficulty]; // distance where bots boost
+bool get farBoost => difficulty == 2; // hard bots also boost from far away
+double newAggr() => rnd.nextDouble() < huntShare ? 0.6 + rnd.nextDouble() * 0.4 : rnd.nextDouble() * 0.45;
+
 const int kPort = 4040;
 
 class NetConn {
@@ -345,6 +355,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
         joystick = p.getBool('joystick') ?? false;
         nameCtrl.text = p.getString('name') ?? '';
         ipCtrl.text = p.getString('lastIp') ?? '';
+        difficulty = (p.getInt('difficulty') ?? 1).clamp(0, 2);
         Sfx.enabled = sound;
       });
     } catch (_) {}
@@ -365,6 +376,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       p.setBool('joystick', joystick);
       p.setString('name', nameCtrl.text.trim());
       p.setString('lastIp', ipCtrl.text.trim());
+      p.setInt('difficulty', difficulty);
     } catch (_) {}
   }
 
@@ -395,12 +407,12 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     }
     // every bot gets a random aggression level; most of them hunt
     for (int i = 1; i < snakes.length; i++) {
-      snakes[i].aggr = 0.4 + rnd.nextDouble() * 0.6;
+      snakes[i].aggr = newAggr();
     }
     // a few BIG snakes at the start only
-    const bigNames = ['Titan', 'Leviathan', 'Anaconda King', 'Basilisk'];
-    const bigSkins = [4, 3, 2, 1];
-    final bigCount = min(bots >= 25 ? 4 : 2, bots);
+    const bigNames = ['Titan', 'Leviathan', 'Anaconda King', 'Basilisk', 'Hydra', 'Colossus'];
+    const bigSkins = [4, 3, 2, 1, 5, 7];
+    final bigCount = min(bots >= 25 ? const [2, 4, 6][difficulty] : const [1, 2, 3][difficulty], bots);
     for (int i = 0; i < bigCount; i++) {
       final big = snakes[1 + i];
       Offset p;
@@ -497,7 +509,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
         if (!human && o.len > s.len * 1.8 + 20) continue; // bots avoid much bigger bots
         final d = (o.head - h).distance;
         // real players are chased from very far away
-        final maxRange = human ? (s.len > 100 ? 3200.0 : 2400.0) : 700.0;
+        final maxRange = human ? (s.len > 100 ? chaseRange * 1.3 : chaseRange) : 700.0;
         if (d > maxRange) continue;
         final score = human ? d * 0.5 : d;
         if (score < best) {
@@ -529,7 +541,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       final ph = prey.head;
       final dist = (ph - h).distance;
       final pdir = Offset(cos(prey.angle), sin(prey.angle));
-      final lead = (dist * 0.5).clamp(60.0, 260.0);
+      final lead = difficulty == 0 ? 0.0 : (dist * 0.5).clamp(60.0, 260.0); // easy bots just chase the head
       final aim = ph + pdir * lead;
       var a = atan2(aim.dy - h.dy, aim.dx - h.dx);
       if (dist < 100) {
@@ -540,8 +552,8 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       }
       s.target = a;
       final human = prey.isPlayer || prey.remote;
-      if (human && dist > 450) s.speedMul = 1.12; // a little faster when running down a player
-      s.boosting = ((dist < 420 && s.len > 18) || (human && dist < 1500 && s.len > 30)) && wrapAngle(a - s.angle).abs() < 0.8;
+      if (human && dist > 450) s.speedMul = chaseSpeed; // a little faster when running down a player
+      s.boosting = ((dist < boostNear && s.len > 18) || (farBoost && human && dist < 1500 && s.len > 30)) && wrapAngle(a - s.angle).abs() < 0.8;
       return;
     }
 
@@ -579,7 +591,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
             s.reset(randomPos());
             s.skin = rnd.nextInt(skinNames.length);
             s.color = palette[rnd.nextInt(palette.length)];
-            s.aggr = 0.4 + rnd.nextDouble() * 0.6;
+            s.aggr = newAggr();
           }
         }
         continue;
@@ -844,6 +856,35 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
                       ),
                     ),
                     const SizedBox(height: 16),
+                    // ---- difficulty
+                    Row(children: [
+                      for (int i = 0; i < 3; i++)
+                        Expanded(
+                          child: GestureDetector(
+                            onTap: () {
+                              setState(() => difficulty = i);
+                              _save();
+                            },
+                            child: Container(
+                              margin: const EdgeInsets.symmetric(horizontal: 4),
+                              height: 42,
+                              alignment: Alignment.center,
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(21),
+                                color: difficulty == i ? [kLime, Colors.amber, kPink][i].withOpacity(0.2) : Colors.white.withOpacity(0.06),
+                                border: Border.all(color: difficulty == i ? [kLime, Colors.amber, kPink][i] : Colors.white24, width: 2),
+                              ),
+                              child: Text(diffNames[i].toUpperCase(),
+                                  style: TextStyle(
+                                      color: difficulty == i ? [kLime, Colors.amber, kPink][i] : Colors.white60,
+                                      fontWeight: FontWeight.w800,
+                                      letterSpacing: 1.5,
+                                      fontSize: 13)),
+                            ),
+                          ),
+                        ),
+                    ]),
+                    const SizedBox(height: 14),
                     // ---- play buttons
                     GestureDetector(
                       onTap: () => startGame(25),
@@ -1112,7 +1153,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
           sound = x;
           Sfx.enabled = x;
         }, setD),
-        _sw('On-screen joystick', Icons.gamepad, joystick, (x) => joystick = x, setD),
+        _sw('Joystick  (off = touch & drag screen)', Icons.gamepad, joystick, (x) => joystick = x, setD),
         _sw('Show names', Icons.badge_outlined, showNames, (x) => showNames = x, setD),
         _sw('Show leaderboard', Icons.leaderboard, showBoard, (x) => showBoard = x, setD),
         const SizedBox(height: 6),
@@ -1644,13 +1685,9 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   }
 
   void _ptr(PointerEvent e) {
-    if (e.kind == PointerDeviceKind.touch) {
-      if (!joystick) {
-        joystick = true; // touch screen detected -> show joystick
-        _save();
-      }
-      return;
-    }
+    // joystick ON  -> touches on the screen are ignored (steer with the joystick)
+    // joystick OFF -> touch / drag anywhere and the centipede follows your finger
+    if (e.kind == PointerDeviceKind.touch && joystick) return;
     pointer = e.localPosition;
     hasPointer = true;
   }
