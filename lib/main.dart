@@ -1098,25 +1098,15 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
                 border: Border.all(color: mapChoice == i ? kCyan : Colors.white12, width: 2),
               ),
               child: Row(children: [
-                SizedBox(
-                  width: 56,
-                  height: 56,
-                  child: Center(
-                    child: Container(
-                      width: 22.0 + i * 15,
-                      height: 22.0 + i * 15,
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(6),
-                        border: Border.all(color: kCyan, width: 2),
-                        color: kCyan.withOpacity(0.15),
-                      ),
-                    ),
-                  ),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(14),
+                  child: SizedBox(width: 92, height: 64, child: CustomPaint(painter: MapPreviewPainter(i))),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Text(mapNames[i], style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w800)),
+                    Text('${mapNames[i]}  •  ${mapThemes[i]}',
+                        style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w800)),
                     Text('${mapSizes[i].toInt()} x ${mapSizes[i].toInt()}  •  ${desc[i]}',
                         style: const TextStyle(color: Colors.white54, fontSize: 13)),
                   ]),
@@ -2017,7 +2007,8 @@ class GamePainter extends CustomPainter {
     final scale = base * (1 - min(g.player.len, 700) / 700 * 0.45);
     final cam = g.cam;
 
-    paint.color = const Color(0xFF07070F);
+    final theme = mapThemeOf(worldSize);
+    paint.color = mapVoidColor(theme);
     canvas.drawRect(Offset.zero & size, paint);
 
     canvas.save();
@@ -2028,24 +2019,15 @@ class GamePainter extends CustomPainter {
     final view = Rect.fromCenter(center: cam, width: size.width / scale, height: size.height / scale).inflate(60);
     final world = Rect.fromLTWH(0, 0, worldSize, worldSize);
 
-    paint.color = const Color(0xFF15152B);
+    paint.color = mapBaseColor(theme);
     canvas.drawRect(world, paint);
+    canvas.save();
+    canvas.clipRect(world);
+    drawMapBackground(canvas, theme, view, DateTime.now().millisecondsSinceEpoch / 1000.0);
+    canvas.restore();
 
     paint
-      ..color = Colors.white10
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 1;
-    final x0 = max(0, (view.left / 100).floor() * 100).toDouble();
-    final x1 = min(worldSize, view.right);
-    final y0 = max(0, (view.top / 100).floor() * 100).toDouble();
-    final y1 = min(worldSize, view.bottom);
-    for (double x = x0; x <= x1; x += 100) {
-      canvas.drawLine(Offset(x, y0), Offset(x, y1), paint);
-    }
-    for (double y = y0; y <= y1; y += 100) {
-      canvas.drawLine(Offset(x0, y), Offset(x1, y), paint);
-    }
-    paint
       ..color = Colors.redAccent
       ..strokeWidth = 8;
     canvas.drawRect(world, paint);
@@ -2449,4 +2431,297 @@ void drawCentipedeLegs(Canvas canvas, List<Offset> pts, double r, double t, {Rec
       canvas.drawLine(pts[0] + hd * r * 0.85 + hp * side * r * 0.45, pts[0] + hd * r * 1.5 + hp * side * r * 0.12, fang);
     }
   }
+}
+
+
+// ================================================================ MAP BACKGROUNDS (drawn with code, no image files)
+const mapThemes = ['Jungle', 'Desert', 'Deep Space'];
+
+int mapThemeOf(double ws) => ws <= 3500 ? 0 : (ws <= 5000 ? 1 : 2);
+
+Color mapBaseColor(int t) => const [Color(0xFF1B3A22), Color(0xFFB8894A), Color(0xFF080820)][t];
+Color mapVoidColor(int t) => const [Color(0xFF0A1A0F), Color(0xFF2A1E0E), Color(0xFF020208)][t];
+
+// stable pseudo random number (0..1) for a map cell
+double hash2(num x, num y, int s) {
+  final v = sin(x * 127.1 + y * 311.7 + s * 74.7) * 43758.5453;
+  return v - v.floorToDouble();
+}
+
+void _cells(Rect v, double cell, void Function(int cx, int cy, Offset o) f) {
+  for (int cx = (v.left / cell).floor() - 1; cx <= (v.right / cell).floor(); cx++) {
+    for (int cy = (v.top / cell).floor() - 1; cy <= (v.bottom / cell).floor(); cy++) {
+      f(cx, cy, Offset((cx + hash2(cx, cy, 90)) * cell, (cy + hash2(cx, cy, 91)) * cell));
+    }
+  }
+}
+
+/// Draws the scenery of a map. [v] is the visible area in world units,
+/// [dn] is a density multiplier (1 = normal, bigger = more objects, used for previews).
+void drawMapBackground(Canvas canvas, int theme, Rect v, double t, {double dn = 1}) {
+  switch (theme) {
+    case 0:
+      _bgForest(canvas, v, dn);
+      break;
+    case 1:
+      _bgDesert(canvas, v, dn);
+      break;
+    default:
+      _bgSpace(canvas, v, t, dn);
+  }
+}
+
+// ---------------------------------------------------------------- JUNGLE
+void _bgForest(Canvas canvas, Rect v, double dn) {
+  final p = Paint();
+  final sp = Paint()
+    ..style = PaintingStyle.stroke
+    ..strokeCap = StrokeCap.round
+    ..strokeWidth = 2;
+
+  // soft patches of light and dark grass
+  _cells(v, 520, (cx, cy, o) {
+    final h = hash2(cx, cy, 1);
+    final base = h < 0.5 ? const Color(0xFF3A8A3F) : const Color(0xFF0D2415);
+    final r = 220 + h * 220;
+    p.color = base.withOpacity(0.16);
+    canvas.drawCircle(o, r, p);
+    canvas.drawCircle(o, r * 0.65, p);
+  });
+
+  // ponds with lily pads
+  _cells(v, 900, (cx, cy, o) {
+    if (hash2(cx, cy, 30) > 0.28 * dn) return;
+    final rx = 90 + hash2(cx, cy, 31) * 80;
+    final ry = rx * 0.65;
+    p.color = const Color(0xFF6B5B3A);
+    canvas.drawOval(Rect.fromCenter(center: o, width: rx * 2 + 22, height: ry * 2 + 22), p);
+    p.color = const Color(0xFF1E6F8F);
+    canvas.drawOval(Rect.fromCenter(center: o, width: rx * 2, height: ry * 2), p);
+    p.color = const Color(0xFF2A8FB0).withOpacity(0.6);
+    canvas.drawOval(Rect.fromCenter(center: o + Offset(-rx * 0.1, -ry * 0.1), width: rx * 1.4, height: ry * 1.4), p);
+    p.color = const Color(0xFF3FA34D);
+    canvas.drawCircle(o + Offset(rx * 0.3, ry * 0.1), 11, p);
+    canvas.drawCircle(o + Offset(-rx * 0.35, -ry * 0.2), 9, p);
+    canvas.drawCircle(o + Offset(rx * 0.05, -ry * 0.45), 8, p);
+  });
+
+  // grass, flowers, bushes, trees
+  _cells(v, 140, (cx, cy, o) {
+    final a = hash2(cx, cy, 10), b = hash2(cx, cy, 11), c = hash2(cx, cy, 12), d = hash2(cx, cy, 13);
+    if (a < 0.5 * dn) {
+      sp.color = const Color(0xFF4FA44A);
+      final s = 0.8 + b * 0.6;
+      canvas.drawLine(o, o + Offset(-4 * s, -9 * s), sp);
+      canvas.drawLine(o, o + Offset(0, -12 * s), sp);
+      canvas.drawLine(o, o + Offset(4 * s, -9 * s), sp);
+    }
+    if (b < 0.09 * dn) {
+      final q = o + Offset(40 * (c - 0.5), 40 * (d - 0.5));
+      const cols = [Color(0xFFFF8FB8), Color(0xFFFFFFFF), Color(0xFFFFE066), Color(0xFF9AD0FF)];
+      p.color = cols[(c * 4).floor() % 4];
+      canvas.drawCircle(q, 4.2, p);
+      p.color = const Color(0xFFFFC107);
+      canvas.drawCircle(q, 1.8, p);
+    }
+    if (c < 0.05 * dn) {
+      final q = o + Offset(30 * (a - 0.5), 30 * (d - 0.5));
+      p.color = const Color(0xFF14532D);
+      canvas.drawCircle(q + const Offset(-11, 3), 15, p);
+      canvas.drawCircle(q + const Offset(11, 3), 15, p);
+      canvas.drawCircle(q + const Offset(0, -8), 17, p);
+      p.color = const Color(0xFF2E7D32);
+      canvas.drawCircle(q + const Offset(-4, -10), 8, p);
+    }
+    if (d < 0.03 * dn) {
+      final rr = 38 + a * 30;
+      p.color = Colors.black.withOpacity(0.25);
+      canvas.drawCircle(o + Offset(rr * 0.25, rr * 0.3), rr, p);
+      p.color = const Color(0xFF1B5E20);
+      canvas.drawCircle(o, rr, p);
+      p.color = const Color(0xFF2E8B3E);
+      canvas.drawCircle(o + Offset(-rr * 0.08, -rr * 0.1), rr * 0.75, p);
+      p.color = const Color(0xFF55B86A).withOpacity(0.55);
+      canvas.drawCircle(o + Offset(-rr * 0.28, -rr * 0.3), rr * 0.35, p);
+    }
+  });
+}
+
+// ---------------------------------------------------------------- DESERT
+void _bgDesert(Canvas canvas, Rect v, double dn) {
+  final p = Paint();
+  final sp = Paint()
+    ..style = PaintingStyle.stroke
+    ..strokeCap = StrokeCap.round;
+
+  // big light and dark dunes
+  _cells(v, 600, (cx, cy, o) {
+    final h = hash2(cx, cy, 1);
+    p.color = (h < 0.5 ? const Color(0xFFE6BE78) : const Color(0xFF8A622E)).withOpacity(0.28);
+    canvas.drawOval(Rect.fromCenter(center: o, width: 520 + h * 200, height: 150 + h * 100), p);
+  });
+
+  // oasis with palm trees
+  _cells(v, 1100, (cx, cy, o) {
+    if (hash2(cx, cy, 30) > 0.22 * dn) return;
+    final rx = 80 + hash2(cx, cy, 31) * 50;
+    p.color = const Color(0xFF8BC34A).withOpacity(0.5);
+    canvas.drawOval(Rect.fromCenter(center: o, width: rx * 2 + 40, height: rx * 1.3 + 40), p);
+    p.color = const Color(0xFF2AA9C9);
+    canvas.drawOval(Rect.fromCenter(center: o, width: rx * 2, height: rx * 1.3), p);
+    p.color = const Color(0xFF7FDDF0).withOpacity(0.6);
+    canvas.drawOval(Rect.fromCenter(center: o + const Offset(-10, -6), width: rx * 1.2, height: rx * 0.7), p);
+    for (int k = 0; k < 3; k++) {
+      final ang = hash2(cx, cy, 40 + k) * 6.28;
+      final pc = o + Offset(cos(ang) * (rx + 24), sin(ang) * (rx * 0.65 + 24));
+      sp
+        ..color = const Color(0xFF2E8B3D)
+        ..strokeWidth = 7;
+      for (int l = 0; l < 7; l++) {
+        final la = l * 6.28 / 7;
+        canvas.drawLine(pc, pc + Offset(cos(la), sin(la)) * 30, sp);
+      }
+      p.color = const Color(0xFF6D4C1F);
+      canvas.drawCircle(pc, 5, p);
+    }
+  });
+
+  // ripples, sparkles, rocks, cactus
+  _cells(v, 160, (cx, cy, o) {
+    final a = hash2(cx, cy, 10), b = hash2(cx, cy, 11), c = hash2(cx, cy, 12), d = hash2(cx, cy, 13);
+    if (a < 0.55 * dn) {
+      final path = Path()
+        ..moveTo(o.dx, o.dy)
+        ..quadraticBezierTo(o.dx + 28, o.dy - 8, o.dx + 55, o.dy)
+        ..quadraticBezierTo(o.dx + 82, o.dy + 8, o.dx + 110, o.dy);
+      sp
+        ..color = Colors.black.withOpacity(0.10)
+        ..strokeWidth = 2;
+      canvas.drawPath(path, sp);
+    }
+    if (b < 0.25 * dn) {
+      p.color = Colors.white.withOpacity(0.5);
+      canvas.drawCircle(o + Offset(60 * (c - 0.5), 60 * (d - 0.5)), 1.6, p);
+    }
+    if (c < 0.05 * dn) {
+      final q = o + Offset(20 * (a - 0.5), 20 * (d - 0.5));
+      final rr = 14 + b * 10;
+      p.color = Colors.black.withOpacity(0.2);
+      canvas.drawOval(Rect.fromCenter(center: q + Offset(4, rr * 0.7), width: rr * 2.4, height: rr * 0.8), p);
+      p.color = const Color(0xFF7A6248);
+      canvas.drawCircle(q, rr, p);
+      canvas.drawCircle(q + Offset(rr * 0.9, rr * 0.3), rr * 0.7, p);
+      p.color = const Color(0xFF9C8266);
+      canvas.drawCircle(q + Offset(-rr * 0.25, -rr * 0.3), rr * 0.45, p);
+    }
+    if (d < 0.03 * dn) {
+      p.color = Colors.black.withOpacity(0.22);
+      canvas.drawOval(Rect.fromCenter(center: o + const Offset(0, 28), width: 44, height: 12), p);
+      p.color = const Color(0xFF2F7D3A);
+      void bar(Rect r) => canvas.drawRRect(RRect.fromRectAndRadius(r, const Radius.circular(5)), p);
+      bar(Rect.fromCenter(center: o, width: 16, height: 58));
+      bar(Rect.fromLTWH(o.dx - 22, o.dy - 4, 16, 7));
+      bar(Rect.fromLTWH(o.dx - 22, o.dy - 22, 8, 26));
+      bar(Rect.fromLTWH(o.dx + 6, o.dy - 14, 16, 7));
+      bar(Rect.fromLTWH(o.dx + 14, o.dy - 32, 8, 26));
+      p.color = const Color(0xFF55B864);
+      canvas.drawRRect(RRect.fromRectAndRadius(Rect.fromCenter(center: o + const Offset(-3, -2), width: 3, height: 48), const Radius.circular(2)), p);
+    }
+  });
+}
+
+// ---------------------------------------------------------------- DEEP SPACE
+void _bgSpace(Canvas canvas, Rect v, double t, double dn) {
+  final p = Paint();
+
+  // colourful nebula clouds
+  const neb = [Color(0xFF7B1FA2), Color(0xFF1976D2), Color(0xFFD81B60), Color(0xFF00ACC1)];
+  _cells(v, 700, (cx, cy, o) {
+    final h = hash2(cx, cy, 1);
+    if (h > 0.65) return;
+    final col = neb[(hash2(cx, cy, 2) * 4).floor() % 4];
+    final r = 260 + h * 300;
+    for (int k = 0; k < 4; k++) {
+      p.color = col.withOpacity(0.07);
+      canvas.drawCircle(o, r * (1 - k * 0.22), p);
+    }
+  });
+
+  // twinkling stars
+  _cells(v, 110, (cx, cy, o) {
+    for (int k = 0; k < 2; k++) {
+      final q = Offset((cx + hash2(cx, cy, 50 + k)) * 110, (cy + hash2(cx, cy, 60 + k)) * 110);
+      final ph = hash2(cx, cy, 70 + k);
+      final tw = min(1.0, max(0.1, 0.45 + 0.5 * sin(t * 2 + ph * 6.28)));
+      final kind = hash2(cx, cy, 80 + k);
+      final col = kind < 0.6 ? Colors.white : (kind < 0.8 ? const Color(0xFFA8D8FF) : const Color(0xFFFFF3B0));
+      p.color = col.withOpacity(tw);
+      canvas.drawCircle(q, 0.8 + ph * 1.4, p);
+    }
+  });
+
+  // planets (some with rings)
+  _cells(v, 1100, (cx, cy, o) {
+    if (hash2(cx, cy, 30) > 0.4 * dn) return;
+    final rr = 70 + hash2(cx, cy, 31) * 70;
+    const pcs = [Color(0xFFE57373), Color(0xFF64B5F6), Color(0xFFFFB74D), Color(0xFF81C784), Color(0xFFBA68C8)];
+    final col = pcs[(hash2(cx, cy, 32) * 5).floor() % 5];
+    p.color = col.withOpacity(0.10);
+    canvas.drawCircle(o, rr * 1.35, p);
+    p.color = col;
+    canvas.drawCircle(o, rr, p);
+    p.color = Colors.black.withOpacity(0.28);
+    canvas.drawCircle(o + Offset(rr * 0.25, rr * 0.22), rr * 0.62, p);
+    p.color = Colors.black.withOpacity(0.16);
+    canvas.drawOval(Rect.fromCenter(center: o + Offset(0, rr * 0.28), width: rr * 1.8, height: rr * 0.18), p);
+    canvas.drawOval(Rect.fromCenter(center: o + Offset(0, -rr * 0.25), width: rr * 1.8, height: rr * 0.14), p);
+    p.color = Colors.white.withOpacity(0.22);
+    canvas.drawCircle(o + Offset(-rr * 0.3, -rr * 0.3), rr * 0.3, p);
+    if (hash2(cx, cy, 33) < 0.45) {
+      p
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = rr * 0.12
+        ..color = Color.lerp(col, Colors.white, 0.4)!.withOpacity(0.75);
+      canvas.drawOval(Rect.fromCenter(center: o, width: rr * 2.9, height: rr * 0.8), p);
+      p.style = PaintingStyle.fill;
+    }
+  });
+
+  // asteroids
+  _cells(v, 320, (cx, cy, o) {
+    if (hash2(cx, cy, 95) > 0.16 * dn) return;
+    final rr = 12 + hash2(cx, cy, 96) * 14;
+    p.color = const Color(0xFF5C5C70);
+    canvas.drawCircle(o, rr, p);
+    canvas.drawCircle(o + Offset(rr * 0.8, rr * 0.2), rr * 0.7, p);
+    canvas.drawCircle(o + Offset(-rr * 0.6, rr * 0.5), rr * 0.6, p);
+    p.color = const Color(0xFF3E3E50);
+    canvas.drawCircle(o + Offset(rr * 0.1, -rr * 0.1), rr * 0.25, p);
+    canvas.drawCircle(o + Offset(rr * 0.9, rr * 0.3), rr * 0.18, p);
+    p.color = Colors.white.withOpacity(0.18);
+    canvas.drawCircle(o + Offset(-rr * 0.3, -rr * 0.4), rr * 0.3, p);
+  });
+}
+
+// small preview of a map (used in the map selection sheet)
+class MapPreviewPainter extends CustomPainter {
+  final int theme;
+  MapPreviewPainter(this.theme);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final box = Offset.zero & size;
+    canvas.drawRect(box, Paint()..color = mapBaseColor(theme));
+    canvas.save();
+    canvas.clipRect(box);
+    const k = 0.42;
+    canvas.scale(k);
+    final off = Offset(600.0 + theme * 500, 400.0);
+    canvas.translate(-off.dx, -off.dy);
+    drawMapBackground(canvas, theme, Rect.fromLTWH(off.dx, off.dy, size.width / k, size.height / k), 1.0, dn: 5);
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
