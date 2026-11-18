@@ -37,14 +37,22 @@ enum NetRole { none, host, client }
 // ---- difficulty: 0 = Easy, 1 = Medium, 2 = Hard
 int difficulty = 1;
 const diffNames = ['Easy', 'Medium', 'Hard'];
-double get huntShare => const [0.25, 0.55, 0.85][difficulty]; // fraction of bots that hunt
-double get chaseRange => const [800.0, 1600.0, 2600.0][difficulty]; // how far bots spot a player
-double get chaseSpeed => const [1.0, 1.05, 1.12][difficulty]; // bot speed while chasing a player
-double get boostNear => const [250.0, 420.0, 420.0][difficulty]; // distance where bots boost
+double get huntShare => const [0.25, 0.7, 0.95][difficulty]; // fraction of bots that hunt
+double get chaseRange => const [600.0, 900.0, 1200.0][difficulty]; // how far bots spot a player
+double get chaseSpeed => const [1.0, 1.08, 1.0][difficulty]; // bot speed while chasing a player
+double get boostNear => const [250.0, 480.0, 420.0][difficulty]; // distance where bots boost
 bool get farBoost => difficulty == 2; // hard bots also boost from far away
+double get botGrowth => const [0.8, 1.25, 2.8][difficulty]; // how fast bots grow when they eat
+double get botBoostCost => const [5.0, 5.0, 1.5][difficulty]; // length a bot loses per second of boost
+int get maxHunters => const [1, 2, 3][difficulty]; // how many bots may attack you at the same time
+double get startGrace => const [12.0, 12.0, 15.0][difficulty]; // seconds at the start with no attack
 double newAggr() => rnd.nextDouble() < huntShare ? 0.6 + rnd.nextDouble() * 0.4 : rnd.nextDouble() * 0.45;
 
 const int kPort = 4040;
+
+// movement speeds (same for the player and for the bots)
+const double kBaseSpeed = 155.0;
+const double kBoostSpeed = 280.0;
 
 class NetConn {
   final WebSocket ws;
@@ -146,18 +154,18 @@ class Sfx {
   static final FlutterTts _tts = FlutterTts();
   static bool _ttsReady = false;
 
-  // plays a loud "ui maa!" voice after you die
+  // plays an "Oh no!" voice after you die
   static Future<void> _voice() async {
     if (!enabled) return;
     try {
       if (!_ttsReady) {
         _ttsReady = true;
-        await _tts.setLanguage('hi-IN');
+        await _tts.setLanguage('en-US');
         await _tts.setVolume(1.0);
-        await _tts.setPitch(1.5);
-        await _tts.setSpeechRate(0.45);
+        await _tts.setPitch(1.2);
+        await _tts.setSpeechRate(0.5);
       }
-      await _tts.speak('उई माँ!');
+      await _tts.speak('Oh no!');
     } catch (_) {}
   }
 
@@ -200,6 +208,8 @@ class Snake {
   List<Offset>? net;
   double aggr = 0.6; // > 0.5 means this bot hunts other snakes
   double speedMul = 1.0;
+  double turnMul = 1.0;
+  double coolT = 0, huntT = 0; // attack cooldown / how long it has been hunting
 
   Snake({required this.isPlayer, required this.name, required this.color, required Offset start, this.skin = 0}) {
     reset(start);
@@ -225,6 +235,8 @@ class Snake {
     kills = 0;
     boosting = false;
     speedT = magnetT = shieldT = 0;
+    coolT = 0;
+    huntT = 0;
     angle = rnd.nextDouble() * 2 * pi;
     target = angle;
     body.clear();
@@ -236,9 +248,9 @@ class Snake {
 
   void move(double dt) {
     final diff = wrapAngle(target - angle);
-    final maxTurn = 4.2 * dt;
+    final maxTurn = 4.2 * dt * turnMul;
     angle += diff.clamp(-maxTurn, maxTurn);
-    final sp = (boosting ? 300.0 : 170.0) * (speedT > 0 ? 1.3 : 1.0) * speedMul;
+    final sp = (boosting ? kBoostSpeed : kBaseSpeed) * (speedT > 0 ? 1.3 : 1.0) * speedMul;
     body[0] = body[0] + Offset(cos(angle), sin(angle)) * sp * dt;
     final sc = spacing;
     for (int i = 1; i < body.length; i++) {
@@ -276,6 +288,8 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   List<MiniDot> netDots = [];
   int nextId = 1, myNetId = -1;
   double _sendAcc = 0, clientTarget = 0;
+  final Set<int> attackers = {}; // bots that are allowed to attack right now
+  double _slotAcc = 0, graceT = 10;
   bool firstSnap = true, netBusy = false;
   String hostIp = '';
   String? netMsg;
@@ -384,6 +398,9 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   void startGame(int bots, {bool hosting = false}) {
     if (!hosting) _leaveNet();
     botCount = bots;
+    if (difficulty == 2) bots += 4; // hard: extra bots
+    graceT = startGrace; // no attacks for the first seconds
+    attackers.clear();
     worldSize = mapSizes[mapChoice];
     final nick = nameCtrl.text.trim();
     snakes.clear();
@@ -408,6 +425,11 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     // every bot gets a random aggression level; most of them hunt
     for (int i = 1; i < snakes.length; i++) {
       snakes[i].aggr = newAggr();
+    }
+    if (difficulty == 2) {
+      for (int i = 1; i < snakes.length; i++) {
+        snakes[i].grow(40 + rnd.nextDouble() * 70); // hard: every bot starts long
+      }
     }
     // a few BIG snakes at the start only
     const bigNames = ['Titan', 'Leviathan', 'Anaconda King', 'Basilisk', 'Hydra', 'Colossus'];
@@ -490,6 +512,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
 
   void _ai(Snake s, double dt) {
     s.aiTimer -= dt;
+    if (s.coolT > 0) s.coolT -= dt;
     final h = s.head;
     s.boosting = false;
 
@@ -503,11 +526,14 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     // 2) hunters pick a prey: nearest snake (real players are preferred)
     Snake? prey;
     s.speedMul = 1.0;
+    s.turnMul = difficulty == 2 ? 1.25 : 1.0;
     if (s.aggr > 0.5) {
       double best = 1e9;
       for (final o in snakes) {
         if (o == s || !o.alive) continue;
         final human = o.isPlayer || o.remote;
+        if (human && (graceT > 0 || !attackers.contains(s.id))) continue; // only a few bots attack at a time
+        if (!human && difficulty == 2 && s.id % 4 != 0) continue; // hard: only some bots hunt other bots
         if (!human && o.len > s.len * 1.8 + 20) continue; // bots avoid much bigger bots
         if (!human && o.len < s.len * 0.4) continue; // big bots do not chase tiny snakes (too risky)
         if (!human && s.len < 25) continue; // tiny bots first grow by eating
@@ -516,7 +542,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
         final maxRange = human ? (s.len > 100 ? chaseRange * 1.3 : chaseRange) : 700.0;
         if (d > maxRange) continue;
         if (s.len < 25 && d > 500) continue; // tiny bots only chase a player who is close
-        final score = human ? d * 0.5 : d;
+        final score = human ? d * (difficulty == 2 ? 0.35 : 0.5) : d;
         if (score < best) {
           best = score;
           prey = o;
@@ -531,7 +557,8 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       for (int i = (o == prey ? 8 : 0); i < o.body.length; i += 3) {
         final p = o.body[i];
         final d = p - h;
-        if (d.distance < s.radius + o.radius + 70 + min(s.len, 300.0) * 0.25) {
+        final margin = (o == prey && difficulty == 2) ? 16.0 : 70 + min(s.len, 300.0) * 0.25;
+        if (d.distance < s.radius + o.radius + margin) {
           final toP = atan2(d.dy, d.dx);
           if (wrapAngle(toP - s.angle).abs() < 1.6) {
             s.target = toP + (wrapAngle(toP - s.angle) >= 0 ? -1.3 : 1.3);
@@ -545,9 +572,37 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     if (prey != null) {
       final ph = prey.head;
       final dist = (ph - h).distance;
+      s.huntT += dt;
+      if ((prey.isPlayer || prey.remote) && (dist < 170 || s.huntT > 14)) {
+        // attack finished: back off for a while so the player can breathe
+        s.coolT = 6.0 + rnd.nextDouble() * 4;
+        s.huntT = 0;
+      }
       final pdir = Offset(cos(prey.angle), sin(prey.angle));
-      final lead = difficulty == 0 ? 0.0 : (dist * 0.5).clamp(60.0, 260.0); // easy bots just chase the head
-      final aim = ph + pdir * lead;
+      final isHuman = prey.isPlayer || prey.remote;
+      final hardHunt = difficulty == 2 && isHuman;
+      final lead = difficulty == 0
+          ? 0.0
+          : (hardHunt
+          ? (dist / kBoostSpeed * ((prey.boosting ? kBoostSpeed : kBaseSpeed) * (prey.speedT > 0 ? 1.3 : 1.0)) * 1.15).clamp(100.0, 700.0)
+          : (dist * 0.5).clamp(60.0, 260.0)); // easy bots just chase the head
+      var aim = ph + pdir * lead;
+      var behindPrey = false;
+      if (hardHunt) {
+        final perp = Offset(-pdir.dy, pdir.dx);
+        final rel = h - ph;
+        final behind = pdir.dx * rel.dx + pdir.dy * rel.dy < 0;
+        behindPrey = behind;
+        final side = (pdir.dx * rel.dy - pdir.dy * rel.dx) >= 0 ? 1.0 : -1.0;
+        if (behind && dist > 160) {
+          aim = aim + perp * side * (prey.radius * 2.2 + 30); // run alongside to get in front
+        } else if (!behind && dist < 700) {
+          // already in front: swing across the player's path, our body becomes a wall in front of his head
+          aim = ph + pdir * lead - perp * side * 260;
+        } else {
+          aim = aim + perp * (((s.id % 3) - 1) * 90.0); // every bot cuts in from a different angle
+        }
+      }
       var a = atan2(aim.dy - h.dy, aim.dx - h.dx);
       if (dist < 100) {
         // too close to the head: swing around instead of crashing head-on
@@ -558,10 +613,14 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       s.target = a;
       final human = prey.isPlayer || prey.remote;
       if (human && dist > 450) s.speedMul = chaseSpeed; // a little faster when running down a player
-      s.boosting = ((dist < boostNear && s.len > 18) || (farBoost && human && dist < 1500 && s.len > 30)) && wrapAngle(a - s.angle).abs() < 0.8;
+      final wantBoost = hardHunt
+          ? ((behindPrey && dist < 700 && s.len > 22) || (dist < 450 && s.len > 18)) // boost only to get in front / finish the cut
+          : ((dist < boostNear && s.len > 18) || (farBoost && human && dist < 1800 && s.len > 22));
+      s.boosting = wantBoost && wrapAngle(a - s.angle).abs() < (hardHunt ? 1.3 : 0.8);
       return;
     }
 
+    s.huntT = 0;
     // 5) no prey: look for food
     if (s.aiTimer <= 0) {
       s.aiTimer = 0.4 + rnd.nextDouble() * 0.8;
@@ -582,13 +641,41 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     }
   }
 
+  void _assignAttackers(double dt) {
+    _slotAcc += dt;
+    if (_slotAcc < 0.4) return;
+    _slotAcc = 0;
+    attackers.clear();
+    final humans = snakes.where((s) => s.alive && (s.isPlayer || s.remote)).toList();
+    if (humans.isEmpty) return;
+    final cands = <MapEntry<double, Snake>>[];
+    for (final s in snakes) {
+      if (!s.alive || s.isPlayer || s.remote || s.aggr <= 0.5 || s.coolT > 0) continue;
+      double best = double.infinity;
+      for (final hm in humans) {
+        final d = (hm.head - s.head).distance;
+        if (d < best) best = d;
+      }
+      final range = s.len > 100 ? chaseRange * 1.3 : chaseRange;
+      if (best <= range) cands.add(MapEntry(best, s));
+    }
+    cands.sort((a, b) => a.key.compareTo(b.key));
+    final k = maxHunters * humans.length;
+    for (int i = 0; i < cands.length && i < k; i++) {
+      attackers.add(cands[i].value.id);
+    }
+  }
+
   void _update(double dt) {
+    graceT = max(0.0, graceT - dt);
+    _assignAttackers(dt);
     for (final s in snakes) {
       if (!s.alive) {
         if (s.remote) {
           if (s.respawnReq) {
             s.respawnReq = false;
             s.reset(randomPos(worldSize * 0.2));
+            graceT = max(graceT, 5.0);
           }
         } else if (!s.isPlayer) {
           s.respawn -= dt;
@@ -598,6 +685,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
             s.color = palette[rnd.nextInt(palette.length)];
             s.aggr = newAggr();
             s.shieldT = 3;
+            if (difficulty == 2) s.grow(35 + rnd.nextDouble() * 40);
           }
         }
         continue;
@@ -621,7 +709,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       if (s.len <= 12) s.boosting = false;
       s.move(dt);
       if (s.boosting) {
-        s.len -= 5 * dt;
+        s.len -= ((s.isPlayer || s.remote) ? 5.0 : botBoostCost) * dt;
         s.dropTimer += dt;
         if (s.dropTimer > 0.3) {
           s.dropTimer = 0;
@@ -643,7 +731,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
           dist = (s.head - f.pos).distance;
         }
         if (dist < reach + f.r * 0.5) {
-          s.len += f.r * 0.07;
+          s.len += f.r * 0.07 * ((s.isPlayer || s.remote) ? 1.0 : botGrowth);
           foods.removeAt(i);
           if (s.isPlayer) Sfx.eat();
         }
@@ -1542,6 +1630,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       player.reset(randomPos(worldSize * 0.2));
       player.len = 40; // reward: start longer
       player.shieldT = 5; // reward: 5 seconds of shield
+      graceT = 6;
       cam = player.head;
     });
   }
@@ -1553,6 +1642,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       } catch (_) {}
     } else if (role == NetRole.host) {
       player.reset(randomPos(worldSize * 0.2));
+      graceT = 6;
       cam = player.head;
     } else {
       startGame(botCount);
