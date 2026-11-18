@@ -1,4 +1,4 @@
-name: snake_game
+name: centipedes_feast
 description: "A new Flutter project."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
@@ -38,6 +38,7 @@ dependencies:
   shared_preferences: ^2.5.3
   google_mobile_ads: ^6.0.0
   flutter_tts: ^4.2.5
+  flutter_launcher_icons: ^0.14.4
 
 dev_dependencies:
   flutter_test:
