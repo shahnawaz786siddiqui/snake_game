@@ -16,7 +16,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  AdService.init();
+  AdsManager.init();
   runApp(const MaterialApp(debugShowCheckedModeBanner: false, home: GamePage()));
 }
 
@@ -437,10 +437,10 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     final bigCount = min(bots >= 25 ? const [2, 4, 6][difficulty] : const [1, 2, 3][difficulty], bots);
     for (int i = 0; i < bigCount; i++) {
       final big = snakes[1 + i];
-      Offset p;
-      do {
+      Offset p = randomPos();
+      for (int tries = 0; tries < 40 && (p - player.head).distance < 1200; tries++) {
         p = randomPos();
-      } while ((p - player.head).distance < 1200);
+      }
       big.reset(p);
       big.name = bigNames[i];
       big.skin = bigSkins[i];
@@ -472,18 +472,22 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   }
 
   void _tick(Duration t) {
-    final dt = ((t - last).inMicroseconds / 1e6).clamp(0.0, 0.05);
-    last = t;
-    if (screen == Screen.play) {
-      if (role == NetRole.client) {
-        _clientUpdate(dt);
+    try {
+      final dt = ((t - last).inMicroseconds / 1e6).clamp(0.0, 0.05);
+      last = t;
+      if (screen == Screen.play) {
+        if (role == NetRole.client) {
+          _clientUpdate(dt);
+        } else {
+          _update(dt);
+          if (role == NetRole.host) _hostBroadcast(dt);
+        }
+        if (mounted) setState(() {});
       } else {
-        _update(dt);
-        if (role == NetRole.host) _hostBroadcast(dt);
+        homeClock.value = t.inMicroseconds / 1e6;
       }
-      setState(() {});
-    } else {
-      homeClock.value = t.inMicroseconds / 1e6;
+    } catch (e, st) {
+      debugPrint('Game tick stopped a frame: $e\n$st');
     }
   }
 
@@ -504,7 +508,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     if (s.isPlayer) {
       _recordPlayer();
       Sfx.die();
-      AdService.onGameOver();
+      AdsManager.onGameOver();
     } else {
       s.respawn = 3;
     }
@@ -1532,7 +1536,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
         if (wasAlive && !s.alive) {
           _recordPlayer();
           Sfx.die();
-          AdService.onGameOver();
+          AdsManager.onGameOver();
         } else if (s.alive && s.len > oldLen + 0.05) {
           Sfx.eat();
         }
@@ -1598,6 +1602,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
 
   void _hostLeft() {
     if (role != NetRole.client) return;
+    AdsManager.cancelPendingInterstitial();
     _leaveNet();
     if (!mounted) return;
     setState(() => screen = Screen.home);
@@ -1625,6 +1630,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   }
 
   void _revive() {
+    AdsManager.cancelPendingInterstitial();
     if (!mounted || role == NetRole.client) return;
     setState(() {
       player.reset(randomPos(worldSize * 0.2));
@@ -1636,6 +1642,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   }
 
   void _playAgain() {
+    AdsManager.cancelPendingInterstitial();
     if (role == NetRole.client) {
       try {
         clientWs?.add(jsonEncode({'t': 'respawn'}));
@@ -1833,6 +1840,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
                   icon: const Icon(Icons.home, color: Colors.white),
                   onPressed: () {
                     if (player.alive) _recordPlayer();
+                    AdsManager.cancelPendingInterstitial();
                     _leaveNet();
                     setState(() => screen = Screen.home);
                   }),
@@ -1927,10 +1935,10 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
                 Text('Score: $lastScore    Kills: $lastKills', style: const TextStyle(color: Colors.white, fontSize: 18)),
                 Text('Best: $bestScore', style: const TextStyle(color: Colors.amber, fontSize: 16)),
                 const SizedBox(height: 16),
-                if (AdService.supported && role != NetRole.client && AdService.rewardAvailable) ...[
+                if (AdsManager.supported && role != NetRole.client && AdsManager.rewardAvailable) ...[
                   ElevatedButton.icon(
                     style: ElevatedButton.styleFrom(backgroundColor: Colors.amber, foregroundColor: Colors.black),
-                    onPressed: () => AdService.showReward(_revive),
+                    onPressed: () => AdsManager.showRewardedInterstitial(_revive),
                     icon: const Icon(Icons.ondemand_video),
                     label: const Text('WATCH AD  •  REVIVE'),
                   ),
@@ -1941,6 +1949,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
                   const SizedBox(width: 12),
                   OutlinedButton(
                       onPressed: () {
+                        AdsManager.cancelPendingInterstitial();
                         _leaveNet();
                         setState(() => screen = Screen.home);
                       },
@@ -2350,92 +2359,166 @@ class SnakePreviewPainter extends CustomPainter {
 
 
 // ================================================================ ADS (Google AdMob)
-// These are Google's TEST ad ids. Replace them with YOUR AdMob ad unit ids before publishing.
-class AdService {
-  static const bannerId = 'ca-app-pub-3940256099942544/6300978111';
-  static const interstitialId = 'ca-app-pub-3940256099942544/1033173712';
-  static const rewardedId = 'ca-app-pub-3940256099942544/5224354917';
+// App id (AndroidManifest + Info.plist): ca-app-pub-8815870887887674~7058253899
+// Revive uses a rewarded interstitial. The player opts in with WATCH AD • REVIVE,
+// and the revive reward is granted only after the ad reports the reward.
+class AdsManager {
+  static const bannerId = 'ca-app-pub-8815870887887674/1016423879';
+  static const interstitialId = 'ca-app-pub-8815870887887674/9325324587';
+  static const rewardedInterstitialId = 'ca-app-pub-8815870887887674/6455618661';
 
-  // ads are enabled on Android only (iOS needs its own ids)
+  // These ad units are the Android placements. iOS needs its own units.
   static bool get supported => !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 
   static gma.InterstitialAd? _inter;
-  static gma.RewardedAd? _reward;
+  static gma.RewardedInterstitialAd? _rewardedInterstitial;
   static int _deaths = 0;
+  static int _interToken = 0;
+  static bool _interLoading = false;
+  static bool _interRetryScheduled = false;
+  static bool _fullScreenVisible = false;
+  static bool _rewardLoading = false;
+  static bool _rewardRetryScheduled = false;
 
-  static bool get rewardAvailable => _reward != null;
+  static bool get rewardAvailable => _rewardedInterstitial != null;
 
   static Future<void> init() async {
     if (!supported) return;
     try {
       await gma.MobileAds.instance.initialize();
       _loadInterstitial();
-      _loadRewarded();
+      loadRewardedInterstitial();
     } catch (_) {}
   }
 
   static void _loadInterstitial() {
+    if (!supported || _inter != null || _interLoading) return;
+    _interLoading = true;
     gma.InterstitialAd.load(
       adUnitId: interstitialId,
       request: const gma.AdRequest(),
       adLoadCallback: gma.InterstitialAdLoadCallback(
-        onAdLoaded: (ad) => _inter = ad,
-        onAdFailedToLoad: (_) => _inter = null,
+        onAdLoaded: (ad) {
+          _interLoading = false;
+          _interRetryScheduled = false;
+          _inter = ad;
+        },
+        onAdFailedToLoad: (_) {
+          _interLoading = false;
+          _inter = null;
+          if (_interRetryScheduled) return;
+          _interRetryScheduled = true;
+          Future.delayed(const Duration(seconds: 30), () {
+            _interRetryScheduled = false;
+            _loadInterstitial();
+          });
+        },
       ),
     );
   }
 
-  static void _loadRewarded() {
-    gma.RewardedAd.load(
-      adUnitId: rewardedId,
+  /// Preloads the revive rewarded interstitial so it is ready on game over.
+  static void loadRewardedInterstitial() {
+    if (!supported || _rewardedInterstitial != null || _rewardLoading) return;
+    _rewardLoading = true;
+    gma.RewardedInterstitialAd.load(
+      adUnitId: rewardedInterstitialId,
       request: const gma.AdRequest(),
-      rewardedAdLoadCallback: gma.RewardedAdLoadCallback(
-        onAdLoaded: (ad) => _reward = ad,
-        onAdFailedToLoad: (_) => _reward = null,
+      rewardedInterstitialAdLoadCallback: gma.RewardedInterstitialAdLoadCallback(
+        onAdLoaded: (ad) {
+          _rewardLoading = false;
+          _rewardRetryScheduled = false;
+          _rewardedInterstitial = ad;
+        },
+        onAdFailedToLoad: (_) {
+          _rewardLoading = false;
+          _rewardedInterstitial = null;
+          if (_rewardRetryScheduled) return;
+          _rewardRetryScheduled = true;
+          Future.delayed(const Duration(seconds: 30), () {
+            _rewardRetryScheduled = false;
+            loadRewardedInterstitial();
+          });
+        },
       ),
     );
   }
 
-  /// Call when a game ends. Shows a full-screen ad on every 3rd game over.
+  /// Drops a game-over interstitial that has not opened yet.
+  /// Called when the player revives, plays again, or leaves, so an ad
+  /// does not cover the next run.
+  static void cancelPendingInterstitial() {
+    _interToken++;
+  }
+
+  /// Call when a game ends. Shows the interstitial on every 3rd game over.
   static void onGameOver() {
     if (!supported) return;
     _deaths++;
     if (_deaths % 3 != 0) return;
-    Future.delayed(const Duration(milliseconds: 1200), () {
-      final ad = _inter;
-      if (ad == null) return;
-      _inter = null;
-      ad.fullScreenContentCallback = gma.FullScreenContentCallback(
-        onAdDismissedFullScreenContent: (a) {
-          a.dispose();
-          _loadInterstitial();
-        },
-        onAdFailedToShowFullScreenContent: (a, _) {
-          a.dispose();
-          _loadInterstitial();
-        },
-      );
-      ad.show();
+    final token = ++_interToken;
+    Future.delayed(const Duration(milliseconds: 900), () {
+      if (token != _interToken || _fullScreenVisible) return;
+      _showInterstitial();
     });
   }
 
-  /// Shows a rewarded video; [onReward] runs only if the player watched it.
-  static void showReward(void Function() onReward) {
-    final ad = _reward;
-    if (ad == null) return;
-    _reward = null;
+  static void _showInterstitial() {
+    final ad = _inter;
+    if (ad == null || _fullScreenVisible) return;
+    _inter = null;
+    _fullScreenVisible = true;
     ad.fullScreenContentCallback = gma.FullScreenContentCallback(
       onAdDismissedFullScreenContent: (a) {
+        _fullScreenVisible = false;
         a.dispose();
-        _loadRewarded();
+        _loadInterstitial();
       },
       onAdFailedToShowFullScreenContent: (a, _) {
+        _fullScreenVisible = false;
         a.dispose();
-        _loadRewarded();
+        _loadInterstitial();
       },
     );
-    ad.show(onUserEarnedReward: (view, reward) => onReward());
+    try {
+      ad.show();
+    } catch (_) {
+      _fullScreenVisible = false;
+      ad.dispose();
+      _loadInterstitial();
+    }
   }
+
+  /// Shows the revive rewarded interstitial. [onReward] runs only if the player earns the reward.
+  static void showRewardedInterstitial(void Function() onReward) {
+    final ad = _rewardedInterstitial;
+    if (ad == null || _fullScreenVisible) return;
+    cancelPendingInterstitial();
+    _rewardedInterstitial = null;
+    _fullScreenVisible = true;
+    ad.fullScreenContentCallback = gma.FullScreenContentCallback(
+      onAdDismissedFullScreenContent: (a) {
+        _fullScreenVisible = false;
+        a.dispose();
+        loadRewardedInterstitial();
+      },
+      onAdFailedToShowFullScreenContent: (a, _) {
+        _fullScreenVisible = false;
+        a.dispose();
+        loadRewardedInterstitial();
+      },
+    );
+    try {
+      ad.show(onUserEarnedReward: (_, __) => onReward());
+    } catch (_) {
+      _fullScreenVisible = false;
+      ad.dispose();
+      loadRewardedInterstitial();
+    }
+  }
+
+  /// Revive entry point: watch the rewarded interstitial, then continue the run.
+  static void showReward(void Function() onReward) => showRewardedInterstitial(onReward);
 }
 
 class AdBanner extends StatefulWidget {
@@ -2451,9 +2534,9 @@ class _AdBannerState extends State<AdBanner> {
   @override
   void initState() {
     super.initState();
-    if (!AdService.supported) return;
+    if (!AdsManager.supported) return;
     _ad = gma.BannerAd(
-      adUnitId: AdService.bannerId,
+      adUnitId: AdsManager.bannerId,
       size: gma.AdSize.banner,
       request: const gma.AdRequest(),
       listener: gma.BannerAdListener(
