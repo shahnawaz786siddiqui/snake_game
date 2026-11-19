@@ -5,7 +5,7 @@ import 'dart:io' show HttpServer, InternetAddress, InternetAddressType, NetworkI
 import 'dart:math';
 import 'dart:typed_data';
 import 'package:audioplayers/audioplayers.dart';
-import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform, TargetPlatform;
+import 'package:flutter/foundation.dart' show kIsWeb, kReleaseMode, defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
@@ -2363,9 +2363,20 @@ class SnakePreviewPainter extends CustomPainter {
 // Revive uses a rewarded interstitial. The player opts in with WATCH AD • REVIVE,
 // and the revive reward is granted only after the ad reports the reward.
 class AdsManager {
-  static const bannerId = 'ca-app-pub-8815870887887674/1016423879';
-  static const interstitialId = 'ca-app-pub-8815870887887674/9325324587';
-  static const rewardedInterstitialId = 'ca-app-pub-8815870887887674/6455618661';
+  // ---- YOUR real ad units: used ONLY in release builds (flutter build apk / appbundle) ----
+  static const _realBannerId = 'ca-app-pub-8815870887887674/1016423879';
+  static const _realInterstitialId = 'ca-app-pub-8815870887887674/9325324587';
+  static const _realRewardedInterstitialId = 'ca-app-pub-8815870887887674/6455618661';
+
+  // ---- Google's official TEST ad units: used in debug / profile runs (flutter run) ----
+  static const _testBannerId = 'ca-app-pub-3940256099942544/6300978111';
+  static const _testInterstitialId = 'ca-app-pub-3940256099942544/1033173712';
+  static const _testRewardedInterstitialId = 'ca-app-pub-3940256099942544/5354046379';
+
+  // Testing can never touch your real ads, so your AdMob account stays safe.
+  static String get bannerId => kReleaseMode ? _realBannerId : _testBannerId;
+  static String get interstitialId => kReleaseMode ? _realInterstitialId : _testInterstitialId;
+  static String get rewardedInterstitialId => kReleaseMode ? _realRewardedInterstitialId : _testRewardedInterstitialId;
 
   // These ad units are the Android placements. iOS needs its own units.
   static bool get supported => !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
