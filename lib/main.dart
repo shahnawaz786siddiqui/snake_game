@@ -49,6 +49,7 @@ double get startGrace => const [12.0, 12.0, 15.0][difficulty]; // seconds at the
 double newAggr() => rnd.nextDouble() < huntShare ? 0.6 + rnd.nextDouble() * 0.4 : rnd.nextDouble() * 0.45;
 
 const int kPort = 4040;
+const int kMaxRevives = 2; // revives (rewarded ads) allowed per round
 
 // movement speeds (same for the player and for the bots)
 const double kBaseSpeed = 155.0;
@@ -290,6 +291,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   double _sendAcc = 0, clientTarget = 0;
   final Set<int> attackers = {}; // bots that are allowed to attack right now
   double _slotAcc = 0, graceT = 10;
+  int revivesLeft = kMaxRevives;
   bool firstSnap = true, netBusy = false;
   String hostIp = '';
   String? netMsg;
@@ -400,6 +402,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     botCount = bots;
     if (difficulty == 2) bots += 4; // hard: extra bots
     graceT = startGrace; // no attacks for the first seconds
+    revivesLeft = kMaxRevives;
     attackers.clear();
     worldSize = mapSizes[mapChoice];
     final nick = nameCtrl.text.trim();
@@ -1633,6 +1636,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     AdsManager.cancelPendingInterstitial();
     if (!mounted || role == NetRole.client) return;
     setState(() {
+      revivesLeft = max(0, revivesLeft - 1);
       player.reset(randomPos(worldSize * 0.2));
       player.len = 40; // reward: start longer
       player.shieldT = 5; // reward: 5 seconds of shield
@@ -1650,6 +1654,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     } else if (role == NetRole.host) {
       player.reset(randomPos(worldSize * 0.2));
       graceT = 6;
+      revivesLeft = kMaxRevives;
       cam = player.head;
     } else {
       startGame(botCount);
@@ -1935,14 +1940,17 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
                 Text('Score: $lastScore    Kills: $lastKills', style: const TextStyle(color: Colors.white, fontSize: 18)),
                 Text('Best: $bestScore', style: const TextStyle(color: Colors.amber, fontSize: 16)),
                 const SizedBox(height: 16),
-                if (AdsManager.supported && role != NetRole.client && AdsManager.rewardAvailable) ...[
+                if (AdsManager.supported && role != NetRole.client && revivesLeft > 0 && AdsManager.rewardAvailable) ...[
                   ElevatedButton.icon(
                     style: ElevatedButton.styleFrom(backgroundColor: Colors.amber, foregroundColor: Colors.black),
                     onPressed: () => AdsManager.showRewardedInterstitial(_revive),
                     icon: const Icon(Icons.ondemand_video),
                     label: const Text('WATCH AD  •  REVIVE'),
                   ),
-                  const SizedBox(height: 10),
+                  const SizedBox(height: 6),
+                  Text('Reward: 5 sec shield + longer snake  •  $revivesLeft left this round',
+                      style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                  const SizedBox(height: 12),
                 ],
                 Row(mainAxisSize: MainAxisSize.min, children: [
                   ElevatedButton(onPressed: _playAgain, child: const Text('PLAY AGAIN')),
@@ -2390,6 +2398,9 @@ class AdsManager {
   static bool _fullScreenVisible = false;
   static bool _rewardLoading = false;
   static bool _rewardRetryScheduled = false;
+  static DateTime _lastFullScreen = DateTime.fromMillisecondsSinceEpoch(0);
+  static const int _minGapSeconds = 60; // minimum time between two full-screen ads
+  static bool get _gapOk => DateTime.now().difference(_lastFullScreen).inSeconds >= _minGapSeconds;
 
   static bool get rewardAvailable => _rewardedInterstitial != null;
 
@@ -2462,14 +2473,15 @@ class AdsManager {
     _interToken++;
   }
 
-  /// Call when a game ends. Shows the interstitial on every 3rd game over.
+  /// Call when a game ends. After every 3rd game over the interstitial is due;
+  /// it is shown only if at least 60 seconds passed since the last full-screen ad.
   static void onGameOver() {
     if (!supported) return;
     _deaths++;
-    if (_deaths % 3 != 0) return;
+    if (_deaths < 3) return;
     final token = ++_interToken;
     Future.delayed(const Duration(milliseconds: 900), () {
-      if (token != _interToken || _fullScreenVisible) return;
+      if (token != _interToken || _fullScreenVisible || !_gapOk) return;
       _showInterstitial();
     });
   }
@@ -2478,10 +2490,13 @@ class AdsManager {
     final ad = _inter;
     if (ad == null || _fullScreenVisible) return;
     _inter = null;
+    _deaths = 0;
     _fullScreenVisible = true;
+    _lastFullScreen = DateTime.now();
     ad.fullScreenContentCallback = gma.FullScreenContentCallback(
       onAdDismissedFullScreenContent: (a) {
         _fullScreenVisible = false;
+        _lastFullScreen = DateTime.now();
         a.dispose();
         _loadInterstitial();
       },
@@ -2507,9 +2522,11 @@ class AdsManager {
     cancelPendingInterstitial();
     _rewardedInterstitial = null;
     _fullScreenVisible = true;
+    _lastFullScreen = DateTime.now();
     ad.fullScreenContentCallback = gma.FullScreenContentCallback(
       onAdDismissedFullScreenContent: (a) {
         _fullScreenVisible = false;
+        _lastFullScreen = DateTime.now();
         a.dispose();
         loadRewardedInterstitial();
       },
