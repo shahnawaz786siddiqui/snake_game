@@ -16,7 +16,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  AdsManager.init();
   runApp(const MaterialApp(debugShowCheckedModeBanner: false, home: GamePage()));
 }
 
@@ -38,14 +37,14 @@ enum NetRole { none, host, client }
 int difficulty = 1;
 const diffNames = ['Easy', 'Medium', 'Hard'];
 double get huntShare => const [0.25, 0.7, 0.95][difficulty]; // fraction of bots that hunt
-double get chaseRange => const [600.0, 900.0, 1200.0][difficulty]; // how far bots spot a player
+double get chaseRange => const [600.0, 900.0, 1500.0][difficulty]; // how far bots spot a player
 double get chaseSpeed => const [1.0, 1.08, 1.0][difficulty]; // bot speed while chasing a player
 double get boostNear => const [250.0, 480.0, 420.0][difficulty]; // distance where bots boost
 bool get farBoost => difficulty == 2; // hard bots also boost from far away
-double get botGrowth => const [0.8, 1.25, 2.8][difficulty]; // how fast bots grow when they eat
+double get botGrowth => const [0.8, 1.25, 3.2][difficulty]; // how fast bots grow when they eat
 double get botBoostCost => const [5.0, 5.0, 1.5][difficulty]; // length a bot loses per second of boost
-int get maxHunters => const [1, 2, 3][difficulty]; // how many bots may attack you at the same time
-double get startGrace => const [12.0, 12.0, 15.0][difficulty]; // seconds at the start with no attack
+int get maxHunters => const [1, 2, 4][difficulty]; // how many bots may attack you at the same time
+double get startGrace => const [12.0, 12.0, 10.0][difficulty]; // seconds at the start with no attack
 double newAggr() => rnd.nextDouble() < huntShare ? 0.6 + rnd.nextDouble() * 0.4 : rnd.nextDouble() * 0.45;
 
 const int kPort = 4040;
@@ -292,6 +291,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   final Set<int> attackers = {}; // bots that are allowed to attack right now
   double _slotAcc = 0, graceT = 10;
   int revivesLeft = kMaxRevives;
+  double _lastHomeT = 0;
   bool firstSnap = true, netBusy = false;
   String hostIp = '';
   String? netMsg;
@@ -319,7 +319,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   ];
   static const colorChoices = [Colors.greenAccent, ...palette];
   int colorIdx = 0, skin = 0, mapChoice = 1;
-  bool showNames = true, showBoard = true, sound = true, joystick = false;
+  bool showNames = true, showBoard = true, sound = true, joystick = true; // joystick is ON by default
   int lastScore = 0, lastKills = 0, bestScore = 0, bestKills = 0;
 
   Color get playerColor => colorChoices[colorIdx];
@@ -342,6 +342,10 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     player = Snake(isPlayer: true, name: 'You', color: playerColor, start: const Offset(2500, 2500));
     ticker = createTicker(_tick)..start();
     _load();
+    // start the ads SDK only AFTER the first screen is visible (keeps the start fast on slow phones)
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      Future.delayed(const Duration(seconds: 2), AdsManager.init);
+    });
   }
 
   @override
@@ -368,7 +372,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
         showNames = p.getBool('showNames') ?? true;
         showBoard = p.getBool('showBoard') ?? true;
         sound = p.getBool('sound') ?? true;
-        joystick = p.getBool('joystick') ?? false;
+        joystick = p.getBool('joystickOn') ?? true;
         nameCtrl.text = p.getString('name') ?? '';
         ipCtrl.text = p.getString('lastIp') ?? '';
         difficulty = (p.getInt('difficulty') ?? 1).clamp(0, 2);
@@ -389,7 +393,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       p.setBool('showNames', showNames);
       p.setBool('showBoard', showBoard);
       p.setBool('sound', sound);
-      p.setBool('joystick', joystick);
+      p.setBool('joystickOn', joystick);
       p.setString('name', nameCtrl.text.trim());
       p.setString('lastIp', ipCtrl.text.trim());
       p.setInt('difficulty', difficulty);
@@ -400,7 +404,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   void startGame(int bots, {bool hosting = false}) {
     if (!hosting) _leaveNet();
     botCount = bots;
-    if (difficulty == 2) bots += 4; // hard: extra bots
+    if (difficulty == 2) bots += 5; // hard: extra bots
     graceT = startGrace; // no attacks for the first seconds
     revivesLeft = kMaxRevives;
     attackers.clear();
@@ -487,7 +491,11 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
         }
         if (mounted) setState(() {});
       } else {
-        homeClock.value = t.inMicroseconds / 1e6;
+        final sec = t.inMicroseconds / 1e6;
+        if (sec - _lastHomeT >= 0.033) {
+          _lastHomeT = sec;
+          homeClock.value = sec;
+        }
       }
     } catch (e, st) {
       debugPrint('Game tick stopped a frame: $e\n$st');
@@ -580,9 +588,10 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       final ph = prey.head;
       final dist = (ph - h).distance;
       s.huntT += dt;
-      if ((prey.isPlayer || prey.remote) && (dist < 170 || s.huntT > 14)) {
+      if ((prey.isPlayer || prey.remote) && (dist < 170 || s.huntT > (difficulty == 2 ? 18 : 14))) {
         // attack finished: back off for a while so the player can breathe
-        s.coolT = 6.0 + rnd.nextDouble() * 4;
+        final cd = difficulty == 2 ? 4.0 : 6.0; // hard: shorter break between attacks
+        s.coolT = cd + rnd.nextDouble() * cd * 0.6;
         s.huntT = 0;
       }
       final pdir = Offset(cos(prey.angle), sin(prey.angle));
@@ -865,7 +874,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
 
   Widget _home() {
     return Stack(children: [
-      Positioned.fill(child: CustomPaint(painter: HomeBgPainter(homeClock))),
+      Positioned.fill(child: RepaintBoundary(child: CustomPaint(painter: HomeBgPainter(homeClock)))),
       SafeArea(
         child: Center(
           child: ConstrainedBox(
@@ -910,7 +919,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
                           child: SizedBox(
                             height: 130,
                             child: Stack(children: [
-                              Positioned.fill(child: CustomPaint(painter: SnakePreviewPainter(homeClock, skin, playerColor))),
+                              Positioned.fill(child: RepaintBoundary(child: CustomPaint(painter: SnakePreviewPainter(homeClock, skin, playerColor)))),
                               Positioned(
                                 left: 16,
                                 top: 12,
@@ -2295,19 +2304,19 @@ class HomeBgPainter extends CustomPainter {
       );
     }
 
-    // floating food
-    for (int i = 0; i < 16; i++) {
+    // floating food (ONE shared transparency layer instead of one per item: much lighter on slow phones)
+    canvas.saveLayer(rect, Paint()..color = Colors.white.withOpacity(0.28));
+    for (int i = 0; i < 12; i++) {
       final bx = ((i * 0.137 + 0.06) % 1.0) * w;
       final by = ((i * 0.291 + t * 0.012 * (0.6 + (i % 3) * 0.35)) % 1.0) * h;
       final sz = 12.0 + (i % 4) * 5;
-      canvas.saveLayer(null, Paint()..color = Colors.white.withOpacity(0.28));
       canvas.save();
       canvas.translate(bx + sin(t * 0.6 + i) * 14, by);
       canvas.rotate(t * 0.4 + i);
       drawFood(canvas, i % foodTypes, Offset.zero, sz);
       canvas.restore();
-      canvas.restore();
     }
+    canvas.restore();
   }
 
   @override
@@ -2404,10 +2413,16 @@ class AdsManager {
 
   static bool get rewardAvailable => _rewardedInterstitial != null;
 
+  /// becomes true when the ads SDK is ready (the banner waits for it)
+  static final ValueNotifier<bool> ready = ValueNotifier(false);
+  static bool _initStarted = false;
+
   static Future<void> init() async {
-    if (!supported) return;
+    if (!supported || _initStarted) return;
+    _initStarted = true;
     try {
       await gma.MobileAds.instance.initialize();
+      ready.value = true;
       _loadInterstitial();
       loadRewardedInterstitial();
     } catch (_) {}
@@ -2563,6 +2578,20 @@ class _AdBannerState extends State<AdBanner> {
   void initState() {
     super.initState();
     if (!AdsManager.supported) return;
+    if (AdsManager.ready.value) {
+      _load();
+    } else {
+      AdsManager.ready.addListener(_onReady);
+    }
+  }
+
+  void _onReady() {
+    AdsManager.ready.removeListener(_onReady);
+    if (mounted) _load();
+  }
+
+  void _load() {
+    if (_ad != null) return;
     _ad = gma.BannerAd(
       adUnitId: AdsManager.bannerId,
       size: gma.AdSize.banner,
@@ -2581,6 +2610,7 @@ class _AdBannerState extends State<AdBanner> {
 
   @override
   void dispose() {
+    AdsManager.ready.removeListener(_onReady);
     _ad?.dispose();
     super.dispose();
   }
