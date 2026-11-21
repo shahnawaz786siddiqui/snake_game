@@ -291,7 +291,9 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   final Set<int> attackers = {}; // bots that are allowed to attack right now
   double _slotAcc = 0, graceT = 10;
   int revivesLeft = kMaxRevives;
-  double _lastHomeT = 0;
+  double _lastHomeT = 0, _lastMoreT = 0;
+  final ScrollController homeScroll = ScrollController();
+  final ValueNotifier<bool> moreBelow = ValueNotifier(false); // true when Skins / Map / Settings are hidden below
   bool firstSnap = true, netBusy = false;
   String hostIp = '';
   String? netMsg;
@@ -351,6 +353,8 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   @override
   void dispose() {
     _leaveNet();
+    homeScroll.dispose();
+    moreBelow.dispose();
     ipCtrl.dispose();
     ticker.dispose();
     gameFocus.dispose();
@@ -496,10 +500,72 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
           _lastHomeT = sec;
           homeClock.value = sec;
         }
+        if (sec - _lastMoreT >= 0.15) {
+          _lastMoreT = sec;
+          _updateMore();
+        }
       }
     } catch (e, st) {
       debugPrint('Game tick stopped a frame: $e\n$st');
     }
+  }
+
+  void _updateMore() {
+    if (!homeScroll.hasClients) return;
+    final p = homeScroll.position;
+    if (!p.hasContentDimensions) return;
+    final more = p.maxScrollExtent - p.pixels > 24;
+    if (more != moreBelow.value) moreBelow.value = more;
+  }
+
+  // bouncing arrow that tells the player: Skins / Map / Settings are further down
+  Widget _moreBelowHint() {
+    return Positioned(
+      left: 0,
+      right: 0,
+      bottom: 10 + MediaQuery.of(context).padding.bottom,
+      child: ValueListenableBuilder<bool>(
+        valueListenable: moreBelow,
+        builder: (context, more, _) => IgnorePointer(
+          ignoring: !more,
+          child: AnimatedOpacity(
+            opacity: more ? 1 : 0,
+            duration: const Duration(milliseconds: 250),
+            child: Center(
+              child: GestureDetector(
+                onTap: () {
+                  if (homeScroll.hasClients) {
+                    homeScroll.animateTo(homeScroll.position.maxScrollExtent,
+                        duration: const Duration(milliseconds: 450), curve: Curves.easeOut);
+                  }
+                },
+                child: Container(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 10, 8),
+                  decoration: BoxDecoration(
+                    color: const Color(0xE6181236),
+                    borderRadius: BorderRadius.circular(24),
+                    border: Border.all(color: kCyan.withOpacity(0.7), width: 1.5),
+                    boxShadow: [BoxShadow(color: kCyan.withOpacity(0.35), blurRadius: 16)],
+                  ),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    const Text('Skins  •  Map  •  Settings',
+                        style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w800, letterSpacing: 1)),
+                    const SizedBox(width: 6),
+                    ValueListenableBuilder<double>(
+                      valueListenable: homeClock,
+                      builder: (_, t, __) => Transform.translate(
+                        offset: Offset(0, sin(t * 6) * 4),
+                        child: const Icon(Icons.keyboard_double_arrow_down, color: kCyan, size: 22),
+                      ),
+                    ),
+                  ]),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   void _recordPlayer() {
@@ -881,6 +947,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
             constraints: const BoxConstraints(maxWidth: 440),
             child: LayoutBuilder(
               builder: (context, box) => SingleChildScrollView(
+                controller: homeScroll,
                 padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
                 child: ConstrainedBox(
                   constraints: BoxConstraints(minHeight: box.maxHeight - 24),
@@ -1079,6 +1146,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
           ),
         ),
       ),
+      _moreBelowHint(),
     ]);
   }
 
