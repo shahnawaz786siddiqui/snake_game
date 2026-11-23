@@ -182,6 +182,7 @@ class Food {
   Offset pos;
   double r;
   int type;
+  bool eaten = false;
   Food(this.pos, this.r, this.type);
 }
 
@@ -291,6 +292,9 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   final Set<int> attackers = {}; // bots that are allowed to attack right now
   double _slotAcc = 0, graceT = 10;
   int revivesLeft = kMaxRevives;
+  List<List<dynamic>> _boardCache = [];
+  double _boardAcc = 0;
+  double arrowAlpha = 0; // fades the direction arrow in / out
   double _lastHomeT = 0, _lastMoreT = 0;
   final ScrollController homeScroll = ScrollController();
   final ValueNotifier<bool> moreBelow = ValueNotifier(false); // true when Skins / Map / Settings are hidden below
@@ -308,6 +312,12 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   Size size = Size.zero;
   Offset pointer = Offset.zero;
   bool hasPointer = false, boostHeld = false;
+
+  // touch-drag steering (joystick OFF)
+  Offset? touchAnchor; // the "centre": where the finger started (it follows the finger)
+  Offset touchPos = Offset.zero;
+  bool touchActive = false, hasTouchSteer = false;
+  double touchAngle = 0;
   Offset cam = const Offset(2500, 2500);
 
   // joystick
@@ -321,7 +331,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   ];
   static const colorChoices = [Colors.greenAccent, ...palette];
   int colorIdx = 0, skin = 0, mapChoice = 1;
-  bool showNames = true, showBoard = true, sound = true, joystick = true; // joystick is ON by default
+  bool showNames = true, showBoard = true, sound = true, showArrow = true, joystick = true; // joystick is ON by default
   int lastScore = 0, lastKills = 0, bestScore = 0, bestKills = 0;
 
   Color get playerColor => colorChoices[colorIdx];
@@ -377,6 +387,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
         showBoard = p.getBool('showBoard') ?? true;
         sound = p.getBool('sound') ?? true;
         joystick = p.getBool('joystickOn') ?? true;
+        showArrow = p.getBool('showArrow') ?? true;
         nameCtrl.text = p.getString('name') ?? '';
         ipCtrl.text = p.getString('lastIp') ?? '';
         difficulty = (p.getInt('difficulty') ?? 1).clamp(0, 2);
@@ -398,6 +409,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       p.setBool('showBoard', showBoard);
       p.setBool('sound', sound);
       p.setBool('joystickOn', joystick);
+      p.setBool('showArrow', showArrow);
       p.setString('name', nameCtrl.text.trim());
       p.setString('lastIp', ipCtrl.text.trim());
       p.setInt('difficulty', difficulty);
@@ -474,6 +486,9 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     }
     cam = player.head;
     hasPointer = false;
+    hasTouchSteer = false;
+    touchActive = false;
+    touchAnchor = null;
     boostHeld = false;
     joyActive = false;
     joy = Offset.zero;
@@ -487,6 +502,8 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       final dt = ((t - last).inMicroseconds / 1e6).clamp(0.0, 0.05);
       last = t;
       if (screen == Screen.play) {
+        final arrowOn = touchActive || (hasPointer && !hasTouchSteer && !joystick);
+        arrowAlpha += ((arrowOn ? 1.0 : 0.0) - arrowAlpha) * min(1.0, dt * 14);
         if (role == NetRole.client) {
           _clientUpdate(dt);
         } else {
@@ -778,9 +795,12 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       if (s.isPlayer) {
         if (joyActive && joy.distance > 8) {
           s.target = atan2(joy.dy, joy.dx);
+        } else if (hasTouchSteer) {
+          s.target = touchAngle;
         } else if (hasPointer && size != Size.zero) {
           s.target = atan2(pointer.dy - size.height / 2, pointer.dx - size.width / 2);
         }
+        s.turnMul = (hasTouchSteer && !joystick) ? 1.35 : 1.0; // touch steering also turns a bit faster
         s.boosting = boostHeld;
       } else if (s.remote) {
         s.target = s.netTarget;
@@ -800,22 +820,37 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       }
     }
 
-    // eat food (with magnet pull)
+    // eat food: foods are put in a coarse grid, so every snake only checks the foods near its head
+    const gc = 200.0;
+    final grid = <int, List<Food>>{};
+    for (final f in foods) {
+      final key = (f.pos.dx / gc).floor() * 1000 + (f.pos.dy / gc).floor();
+      (grid[key] ??= <Food>[]).add(f);
+    }
     for (final s in snakes) {
       if (!s.alive) continue;
       final reach = s.radius + 8;
-      for (int i = foods.length - 1; i >= 0; i--) {
-        final f = foods[i];
-        final d = s.head - f.pos;
-        var dist = d.distance;
-        if (s.magnetT > 0 && dist < 260 && dist > 1) {
-          f.pos += d / dist * min(dist, 650 * dt);
-          dist = (s.head - f.pos).distance;
-        }
-        if (dist < reach + f.r * 0.5) {
-          s.len += f.r * 0.07 * ((s.isPlayer || s.remote) ? 1.0 : botGrowth);
-          foods.removeAt(i);
-          if (s.isPlayer) Sfx.eat();
+      final range = s.magnetT > 0 ? 270.0 : reach + 16;
+      final x0 = ((s.head.dx - range) / gc).floor(), x1 = ((s.head.dx + range) / gc).floor();
+      final y0 = ((s.head.dy - range) / gc).floor(), y1 = ((s.head.dy + range) / gc).floor();
+      for (int cx = x0; cx <= x1; cx++) {
+        for (int cy = y0; cy <= y1; cy++) {
+          final cell = grid[cx * 1000 + cy];
+          if (cell == null) continue;
+          for (final f in cell) {
+            if (f.eaten) continue;
+            final d = s.head - f.pos;
+            var dist = d.distance;
+            if (s.magnetT > 0 && dist < 260 && dist > 1) {
+              f.pos += d / dist * min(dist, 650 * dt);
+              dist = (s.head - f.pos).distance;
+            }
+            if (dist < reach + f.r * 0.5) {
+              f.eaten = true;
+              s.len += f.r * 0.07 * ((s.isPlayer || s.remote) ? 1.0 : botGrowth);
+              if (s.isPlayer) Sfx.eat();
+            }
+          }
         }
       }
       // power-ups
@@ -831,6 +866,8 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       }
     }
 
+    foods.removeWhere((f) => f.eaten);
+
     // collisions
     for (final s in snakes) {
       if (!s.alive) continue;
@@ -841,13 +878,22 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
           if (o == s || !o.alive) continue;
           if ((o.head - h).distance > o.body.length * o.spacing + 100) continue;
           final limit = min(s.radius * 0.7, 10.0) + o.radius * 0.8;
-          for (final p in o.body) {
-            if ((p - h).distance < limit) {
+          final limit2 = limit * limit;
+          final sp = max(o.spacing, 1.0);
+          final pts = o.body;
+          int bi = 0;
+          while (bi < pts.length) {
+            final dx = pts[bi].dx - h.dx, dy = pts[bi].dy - h.dy;
+            final d2 = dx * dx + dy * dy;
+            if (d2 < limit2) {
               dead = true;
               o.kills++;
               if (o.isPlayer) Sfx.kill();
               break;
             }
+            // body points are at most one spacing apart, so far points can be skipped safely
+            final skip = ((sqrt(d2) - limit) / sp).floor();
+            bi += skip > 1 ? skip : 1;
           }
           if (dead) break;
         }
@@ -855,11 +901,21 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       if (dead) _kill(s);
     }
 
+    if (foods.length > foodCount * 2) foods.removeRange(0, foods.length - foodCount * 2); // never let food pile up
     while (foods.length < foodCount) {
       foods.add(newFood());
     }
     while (powers.length < powerCount) {
       powers.add(PowerUp(randomPos(100), rnd.nextInt(3)));
+    }
+
+    _boardAcc += dt;
+    if (_boardAcc >= 0.3) {
+      _boardAcc = 0;
+      _boardCache = (snakes.where((s) => s.alive).toList()..sort((a, b) => b.len.compareTo(a.len)))
+          .take(8)
+          .map<List<dynamic>>((s) => [s.name, s.score, s.isPlayer])
+          .toList();
     }
 
     if (player.alive) cam = cam + (player.head - cam) * min(1.0, dt * 8);
@@ -1322,6 +1378,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
           Sfx.enabled = x;
         }, setD),
         _sw('Joystick  (off = touch & drag screen)', Icons.gamepad, joystick, (x) => joystick = x, setD),
+        _sw('Direction arrow', Icons.navigation, showArrow, (x) => showArrow = x, setD),
         _sw('Show names', Icons.badge_outlined, showNames, (x) => showNames = x, setD),
         _sw('Show leaderboard', Icons.leaderboard, showBoard, (x) => showBoard = x, setD),
         const SizedBox(height: 6),
@@ -1557,6 +1614,9 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
         } catch (_) {}
       }, onDone: _hostLeft, onError: (_) => _hostLeft());
       hasPointer = false;
+      hasTouchSteer = false;
+      touchActive = false;
+      touchAnchor = null;
       boostHeld = false;
       joyActive = false;
       joy = Offset.zero;
@@ -1642,6 +1702,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
 
   double? _steerTarget() {
     if (joyActive && joy.distance > 8) return atan2(joy.dy, joy.dx);
+    if (hasTouchSteer) return touchAngle;
     if (hasPointer && size != Size.zero) return atan2(pointer.dy - size.height / 2, pointer.dx - size.width / 2);
     return null;
   }
@@ -1859,12 +1920,44 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     });
   }
 
+  int? _touchId; // the finger that is steering
+
   void _ptr(PointerEvent e) {
-    // joystick ON  -> touches on the screen are ignored (steer with the joystick)
-    // joystick OFF -> touch / drag anywhere and the centipede follows your finger
-    if (e.kind == PointerDeviceKind.touch && joystick) return;
+    if (e.kind == PointerDeviceKind.touch) {
+      if (joystick) return; // joystick ON: the joystick steers, touches on the screen are ignored
+      // Touch-drag steering: the place where you put your finger is the centre.
+      // Moving the finger a little turns the snake. The centre follows the finger,
+      // so a small swipe is always enough (no need to circle around the whole screen).
+      if (e is PointerDownEvent || _touchId == null) {
+        _touchId = e.pointer;
+        touchAnchor = e.localPosition;
+        touchActive = true;
+      }
+      if (e.pointer != _touchId) return;
+      touchPos = e.localPosition;
+      var d = touchPos - touchAnchor!;
+      const reach = 60.0; // smaller = more sensitive
+      if (d.distance > reach) {
+        touchAnchor = touchPos - d / d.distance * reach;
+        d = touchPos - touchAnchor!;
+      }
+      if (d.distance > 5) {
+        touchAngle = atan2(d.dy, d.dx);
+        hasTouchSteer = true;
+      }
+      return;
+    }
+    hasTouchSteer = false;
     pointer = e.localPosition;
     hasPointer = true;
+  }
+
+  void _ptrUp(PointerEvent e) {
+    if (e.kind == PointerDeviceKind.touch && e.pointer == _touchId) {
+      _touchId = null;
+      touchActive = false;
+      touchAnchor = null;
+    }
   }
 
   void _joyUpdate(PointerEvent e) {
@@ -1891,25 +1984,23 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   );
 
   Widget _game() {
-    final List<List<dynamic>> board = role == NetRole.client
-        ? netBoard
-        : (snakes.where((s) => s.alive).toList()..sort((a, b) => b.len.compareTo(a.len)))
-        .take(8)
-        .map<List<dynamic>>((s) => [s.name, s.score, s.isPlayer])
-        .toList();
+    final List<List<dynamic>> board = role == NetRole.client ? netBoard : _boardCache;
     return LayoutBuilder(builder: (context, c) {
       size = Size(c.maxWidth, c.maxHeight);
       return Stack(children: [
         Positioned.fill(
           child: MouseRegion(
             onHover: (e) {
+              hasTouchSteer = false;
               pointer = e.localPosition;
               hasPointer = true;
             },
             child: Listener(
               onPointerDown: _ptr,
               onPointerMove: _ptr,
-              child: CustomPaint(painter: GamePainter(this)),
+              onPointerUp: _ptrUp,
+              onPointerCancel: _ptrUp,
+              child: RepaintBoundary(child: CustomPaint(painter: GamePainter(this))),
             ),
           ),
         ),
@@ -2190,6 +2281,21 @@ class GamePainter extends CustomPainter {
   final _GamePageState g;
   GamePainter(this.g);
 
+  // name tags are laid out once and reused (laying out text every frame is slow on weak phones)
+  static final Map<String, TextPainter> _nameCache = {};
+  static TextPainter _nameTp(String name) {
+    var tp = _nameCache[name];
+    if (tp == null) {
+      if (_nameCache.length > 120) _nameCache.clear();
+      tp = TextPainter(
+        text: TextSpan(text: name, style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      _nameCache[name] = tp;
+    }
+    return tp;
+  }
+
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint();
@@ -2213,7 +2319,7 @@ class GamePainter extends CustomPainter {
     canvas.drawRect(world, paint);
     canvas.save();
     canvas.clipRect(world);
-    drawMapBackground(canvas, theme, view, DateTime.now().millisecondsSinceEpoch / 1000.0);
+    drawMapBackground(canvas, theme, view, DateTime.now().millisecondsSinceEpoch / 1000.0, fine: scale >= 0.5);
     canvas.restore();
 
     paint
@@ -2223,9 +2329,15 @@ class GamePainter extends CustomPainter {
     canvas.drawRect(world, paint);
     paint.style = PaintingStyle.fill;
 
-    // food
+    // food (plain dots when zoomed out: much cheaper)
+    final simpleFood = scale < 0.5;
     for (final f in g.foods) {
       if (!view.contains(f.pos)) continue;
+      if (simpleFood) {
+        paint.color = _foodDot[f.type];
+        canvas.drawCircle(f.pos, f.r * 1.15, paint);
+        continue;
+      }
       paint.color = Colors.white.withOpacity(0.10);
       canvas.drawCircle(f.pos, f.r * 1.3, paint);
       drawFood(canvas, f.type, f.pos, f.r);
@@ -2243,22 +2355,39 @@ class GamePainter extends CustomPainter {
       if (!s.alive) continue;
       final r = s.radius;
       final n = s.body.length;
-      drawCentipedeLegs(canvas, s.body, r, DateTime.now().millisecondsSinceEpoch / 1000.0,
-          view: view, legColor: Color.lerp(s.color, Colors.black, 0.55));
-      for (int i = n - 1; i >= 0; i--) {
+      // snakes that are completely out of sight are not drawn at all
+      if ((s.head - view.center).distance > view.longestSide / 2 + n * s.spacing + r * 3 + 100) continue;
+      final nowSec = DateTime.now().millisecondsSinceEpoch / 1000.0;
+      // level of detail: long snakes / zoomed-out view draw fewer legs and segments
+      final legStep = (n > 100 || scale < 0.4) ? 4 : 2;
+      final bodyStep = n > 140 ? 2 : 1;
+      final outline = r * scale > 4.5;
+      final boosted = s.boosting || s.speedT > 0;
+      drawCentipedeLegs(canvas, s.body, r, nowSec,
+          view: view, legColor: Color.lerp(s.color, Colors.black, 0.55), step: legStep);
+      void seg(int i) {
         final p = s.body[i];
-        if (!view.contains(p)) continue;
-        paint.color = skinColor(s.skin, s.color, i, n);
-        if (s.boosting || s.speedT > 0) paint.color = Color.lerp(paint.color, Colors.white, 0.25)!;
-        canvas.drawCircle(p, r, paint);
-        final fill = paint.color;
+        if (!view.contains(p)) return;
+        var col = skinColor(s.skin, s.color, i, n);
+        if (boosted) col = Color.lerp(col, Colors.white, 0.25)!;
         paint
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = max(1.5, r * 0.12)
-          ..color = Color.lerp(fill, Colors.black, 0.45)!;
+          ..style = PaintingStyle.fill
+          ..color = col;
         canvas.drawCircle(p, r, paint);
-        paint.style = PaintingStyle.fill;
+        if (outline) {
+          paint
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = max(1.5, r * 0.12)
+            ..color = Color.lerp(col, Colors.black, 0.45)!;
+          canvas.drawCircle(p, r, paint);
+          paint.style = PaintingStyle.fill;
+        }
       }
+
+      for (int i = n - 1; i > 0; i -= bodyStep) {
+        seg(i);
+      }
+      seg(0);
       final h = s.head;
       final dir = Offset(cos(s.angle), sin(s.angle));
       final perp = Offset(-dir.dy, dir.dx);
@@ -2278,14 +2407,54 @@ class GamePainter extends CustomPainter {
         paint.style = PaintingStyle.fill;
       }
       if (g.showNames && view.contains(h)) {
-        final tp = TextPainter(
-          text: TextSpan(text: s.name, style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)),
-          textDirection: TextDirection.ltr,
-        )..layout();
+        final tp = _nameTp(s.name);
         tp.paint(canvas, h + Offset(-tp.width / 2, -r - 24));
       }
     }
+    // direction arrow: appears while you touch the screen and fades away when you let go
+    final pl = g.player;
+    final al = g.arrowAlpha;
+    if (g.showArrow && !g.joystick && pl.alive && pl.body.isNotEmpty && al > 0.03) {
+      final ang = g.role == NetRole.client ? g.clientTarget : pl.target;
+      final dir = Offset(cos(ang), sin(ang));
+      final side = Offset(-dir.dy, dir.dx);
+      final k = 1 / scale; // keeps the arrow the same size on the screen
+      final a0 = pl.head + dir * (pl.radius + 14 * k);
+      final a1 = pl.head + dir * (pl.radius + 50 * k);
+      final tip = a1 + dir * 13 * k;
+      Paint stroke(double w, Color c) => Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeCap = StrokeCap.round
+        ..strokeWidth = w * k
+        ..color = c;
+      canvas.drawLine(a0, a1, stroke(10, kLime.withOpacity(0.22 * al))); // soft glow
+      canvas.drawLine(a0, a1, stroke(6, Colors.black.withOpacity(0.35 * al))); // dark edge
+      canvas.drawLine(a0, a1, stroke(3.4, kLime.withOpacity(0.95 * al)));
+      final head = Path()
+        ..moveTo(tip.dx, tip.dy)
+        ..lineTo(a1.dx + side.dx * 8.5 * k, a1.dy + side.dy * 8.5 * k)
+        ..lineTo(a1.dx - side.dx * 8.5 * k, a1.dy - side.dy * 8.5 * k)
+        ..close();
+      canvas.drawPath(head, Paint()..color = Colors.black.withOpacity(0.35 * al));
+      canvas.save();
+      canvas.translate(-dir.dx * 1.2 * k, -dir.dy * 1.2 * k);
+      canvas.drawPath(head, Paint()..color = kLime.withOpacity(0.95 * al));
+      canvas.restore();
+    }
     canvas.restore();
+
+    // touch steering: a faint ring where the finger started + a dot under the finger
+    if (g.touchActive && g.touchAnchor != null && !g.joystick) {
+      paint
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2
+        ..color = Colors.white.withOpacity(0.28);
+      canvas.drawCircle(g.touchAnchor!, 46, paint);
+      paint
+        ..style = PaintingStyle.fill
+        ..color = Colors.white.withOpacity(0.25);
+      canvas.drawCircle(g.touchPos, 18, paint);
+    }
 
     // minimap (right side, just above the BOOST button)
     const mm = 90.0;
@@ -2328,6 +2497,7 @@ class JoyPainter extends CustomPainter {
 
 // ================================================================ home screen painters
 const kLime = Color(0xFF7CFF6B);
+const _foodDot = [Color(0xFFFFD54F), Color(0xFFD9902F), Color(0xFFAED581), Color(0xFFB05AA8), Color(0xFFE53935)];
 const kCyan = Color(0xFF39E1FF);
 const kViolet = Color(0xFF8E5BFF);
 const kPink = Color(0xFFFF4FA3);
@@ -2693,7 +2863,7 @@ class _AdBannerState extends State<AdBanner> {
 
 
 // ================================================================ centipede skin (legs + antennae)
-void drawCentipedeLegs(Canvas canvas, List<Offset> pts, double r, double t, {Rect? view, Color? legColor}) {
+void drawCentipedeLegs(Canvas canvas, List<Offset> pts, double r, double t, {Rect? view, Color? legColor, int step = 2}) {
   if (pts.length < 3) return;
   final p = Paint()
     ..style = PaintingStyle.stroke
@@ -2701,7 +2871,7 @@ void drawCentipedeLegs(Canvas canvas, List<Offset> pts, double r, double t, {Rec
     ..strokeWidth = max(2.0, r * 0.22)
     ..color = legColor ?? const Color(0xFF5A2A0B);
   final foot = Paint()..color = Color.lerp(legColor ?? const Color(0xFF5A2A0B), Colors.black, 0.4)!;
-  for (int i = 1; i < pts.length - 1; i += 2) {
+  for (int i = 1; i < pts.length - 1; i += step) {
     final c = pts[i];
     if (view != null && !view.contains(c)) continue;
     var d = pts[i - 1] - pts[i + 1];
@@ -2763,21 +2933,21 @@ void _cells(Rect v, double cell, void Function(int cx, int cy, Offset o) f) {
 
 /// Draws the scenery of a map. [v] is the visible area in world units,
 /// [dn] is a density multiplier (1 = normal, bigger = more objects, used for previews).
-void drawMapBackground(Canvas canvas, int theme, Rect v, double t, {double dn = 1}) {
+void drawMapBackground(Canvas canvas, int theme, Rect v, double t, {double dn = 1, bool fine = true}) {
   switch (theme) {
     case 0:
-      _bgForest(canvas, v, dn);
+      _bgForest(canvas, v, dn, fine);
       break;
     case 1:
-      _bgDesert(canvas, v, dn);
+      _bgDesert(canvas, v, dn, fine);
       break;
     default:
-      _bgSpace(canvas, v, t, dn);
+      _bgSpace(canvas, v, t, dn, fine);
   }
 }
 
 // ---------------------------------------------------------------- JUNGLE
-void _bgForest(Canvas canvas, Rect v, double dn) {
+void _bgForest(Canvas canvas, Rect v, double dn, bool fine) {
   final p = Paint();
   final sp = Paint()
     ..style = PaintingStyle.stroke
@@ -2813,15 +2983,17 @@ void _bgForest(Canvas canvas, Rect v, double dn) {
 
   // grass, flowers, bushes, trees
   _cells(v, 140, (cx, cy, o) {
-    final a = hash2(cx, cy, 10), b = hash2(cx, cy, 11), c = hash2(cx, cy, 12), d = hash2(cx, cy, 13);
-    if (a < 0.5 * dn) {
+    final c = hash2(cx, cy, 12), d = hash2(cx, cy, 13);
+    if (!fine && c >= 0.05 * dn && d >= 0.03 * dn) return; // zoomed out: only bushes and trees matter
+    final a = hash2(cx, cy, 10), b = hash2(cx, cy, 11);
+    if (fine && a < 0.5 * dn) {
       sp.color = const Color(0xFF4FA44A);
       final s = 0.8 + b * 0.6;
       canvas.drawLine(o, o + Offset(-4 * s, -9 * s), sp);
       canvas.drawLine(o, o + Offset(0, -12 * s), sp);
       canvas.drawLine(o, o + Offset(4 * s, -9 * s), sp);
     }
-    if (b < 0.09 * dn) {
+    if (fine && b < 0.09 * dn) {
       final q = o + Offset(40 * (c - 0.5), 40 * (d - 0.5));
       const cols = [Color(0xFFFF8FB8), Color(0xFFFFFFFF), Color(0xFFFFE066), Color(0xFF9AD0FF)];
       p.color = cols[(c * 4).floor() % 4];
@@ -2853,7 +3025,7 @@ void _bgForest(Canvas canvas, Rect v, double dn) {
 }
 
 // ---------------------------------------------------------------- DESERT
-void _bgDesert(Canvas canvas, Rect v, double dn) {
+void _bgDesert(Canvas canvas, Rect v, double dn, bool fine) {
   final p = Paint();
   final sp = Paint()
     ..style = PaintingStyle.stroke
@@ -2893,8 +3065,10 @@ void _bgDesert(Canvas canvas, Rect v, double dn) {
 
   // ripples, sparkles, rocks, cactus
   _cells(v, 160, (cx, cy, o) {
-    final a = hash2(cx, cy, 10), b = hash2(cx, cy, 11), c = hash2(cx, cy, 12), d = hash2(cx, cy, 13);
-    if (a < 0.55 * dn) {
+    final c = hash2(cx, cy, 12), d = hash2(cx, cy, 13);
+    if (!fine && c >= 0.05 * dn && d >= 0.03 * dn) return; // zoomed out: only rocks and cactus matter
+    final a = hash2(cx, cy, 10), b = hash2(cx, cy, 11);
+    if (fine && a < 0.55 * dn) {
       final path = Path()
         ..moveTo(o.dx, o.dy)
         ..quadraticBezierTo(o.dx + 28, o.dy - 8, o.dx + 55, o.dy)
@@ -2904,7 +3078,7 @@ void _bgDesert(Canvas canvas, Rect v, double dn) {
         ..strokeWidth = 2;
       canvas.drawPath(path, sp);
     }
-    if (b < 0.25 * dn) {
+    if (fine && b < 0.25 * dn) {
       p.color = Colors.white.withOpacity(0.5);
       canvas.drawCircle(o + Offset(60 * (c - 0.5), 60 * (d - 0.5)), 1.6, p);
     }
@@ -2936,7 +3110,7 @@ void _bgDesert(Canvas canvas, Rect v, double dn) {
 }
 
 // ---------------------------------------------------------------- DEEP SPACE
-void _bgSpace(Canvas canvas, Rect v, double t, double dn) {
+void _bgSpace(Canvas canvas, Rect v, double t, double dn, bool fine) {
   final p = Paint();
 
   // colourful nebula clouds
@@ -2954,7 +3128,7 @@ void _bgSpace(Canvas canvas, Rect v, double t, double dn) {
 
   // twinkling stars
   _cells(v, 110, (cx, cy, o) {
-    for (int k = 0; k < 2; k++) {
+    for (int k = 0; k < (fine ? 2 : 1); k++) {
       final q = Offset((cx + hash2(cx, cy, 50 + k)) * 110, (cy + hash2(cx, cy, 60 + k)) * 110);
       final ph = hash2(cx, cy, 70 + k);
       final tw = min(1.0, max(0.1, 0.45 + 0.5 * sin(t * 2 + ph * 6.28)));
