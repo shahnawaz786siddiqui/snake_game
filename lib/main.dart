@@ -5,7 +5,7 @@ import 'dart:io' show HttpServer, InternetAddress, InternetAddressType, NetworkI
 import 'dart:math';
 import 'dart:typed_data';
 import 'package:audioplayers/audioplayers.dart';
-import 'package:flutter/foundation.dart' show kIsWeb, kReleaseMode, defaultTargetPlatform, TargetPlatform;
+import 'package:flutter/foundation.dart' show kIsWeb, kReleaseMode, defaultTargetPlatform, TargetPlatform, compute;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
@@ -146,7 +146,7 @@ class Sfx {
 
   static void eat() {
     final now = DateTime.now().millisecondsSinceEpoch;
-    if (now - _lastEat < 90) return;
+    if (now - _lastEat < 170) return; // LAG FIX: fewer audio calls while eating a lot
     _lastEat = now;
     _play(_a, _eat);
   }
@@ -175,6 +175,242 @@ class Sfx {
   }
   static void kill() => _play(_c, _kill);
   static void power() => _play(_d, _power);
+}
+
+
+// ================================================================ background music (composed in code: 100% original, no copyright)
+class Music {
+  static bool enabled = true;
+  static final AudioPlayer _p = AudioPlayer();
+  static final Map<int, Uint8List> _cache = {};
+  static int want = 0; // 1 = home music, 2 = game music
+  static int _cur = 0;
+  static bool _busy = false, _ctxSet = false;
+
+  static Future<void> play(int kind) async {
+    want = kind;
+    await sync();
+  }
+
+  // makes the player match what is wanted (home / game / off). Safe to call any time.
+  static Future<void> sync() async {
+    if (_busy) return;
+    _busy = true;
+    try {
+      if (!_ctxSet) {
+        _ctxSet = true;
+        // music must not be cut by the sound effects (no audio-focus fight between the players)
+        try {
+          await AudioPlayer.global.setAudioContext(AudioContext(
+            android: AudioContextAndroid(audioFocus: AndroidAudioFocus.none),
+            iOS: AudioContextIOS(category: AVAudioSessionCategory.ambient),
+          ));
+        } catch (_) {}
+      }
+      for (int guard = 0; guard < 6; guard++) {
+        final target = enabled ? want : 0;
+        if (target == _cur) break;
+        if (target == 0) {
+          await _p.stop();
+          _cur = 0;
+          continue;
+        }
+        final b = _cache[target];
+        if (b == null) {
+          final built = await compute<int, Uint8List>(_buildTrack, target); // built in the background, the game does not stutter
+          _cache[target] = built;
+          continue; // check again: the wanted track may have changed meanwhile
+        }
+        await _p.setReleaseMode(ReleaseMode.loop);
+        await _p.setVolume(0.30);
+        await _p.play(BytesSource(b));
+        _cur = target;
+      }
+    } catch (_) {
+    } finally {
+      _busy = false;
+    }
+  }
+
+  static void pause() {
+    if (_cur == 0) return;
+    try {
+      _p.pause();
+    } catch (_) {}
+  }
+
+  static void resume() {
+    if (_cur == 0 || !enabled) return;
+    try {
+      _p.resume();
+    } catch (_) {}
+  }
+}
+
+/// Builds one looping music track (kind 1 = calm home theme, kind 2 = fast game theme) as a WAV file.
+/// The loop is seamless: note tails wrap around to the start.
+Uint8List _buildTrack(int kind) {
+  const sr = 22050;
+  final game = kind == 2;
+  final beat = 60.0 / (game ? 128.0 : 92.0);
+  const bars = 8;
+  final n = (beat * 4 * bars * sr).round();
+  final buf = Float64List(n);
+  int seed = 12345;
+  double noise() {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return seed / 0x3fffffff - 1.0;
+  }
+
+  // one synth note. wave: 0 sine, 1 triangle, 2 soft square. dec > 0 = plucked, dec == 0 = soft pad
+  void tone(double t0, double dur, double f, double amp, int wave, double dec) {
+    final i0 = (t0 * sr).round();
+    final len = (dur * sr).round();
+    final dp = 2 * pi * f / sr;
+    double ph = 0;
+    for (int i = 0; i < len; i++) {
+      final t = i / sr;
+      double env;
+      if (dec > 0) {
+        env = exp(-t * dec);
+      } else {
+        env = min(1.0, min(t / 0.45, (dur - t) / 0.45));
+      }
+      env *= min(1.0, min(t / 0.005, (dur - t) / 0.01));
+      if (env <= 0) {
+        ph += dp;
+        continue;
+      }
+      double v;
+      if (wave == 0) {
+        v = sin(ph);
+      } else if (wave == 1) {
+        v = 2 / pi * asin(sin(ph));
+      } else {
+        v = (sin(ph) + sin(ph * 3) / 3 + sin(ph * 5) / 5) * 0.7;
+      }
+      ph += dp;
+      buf[(i0 + i) % n] += v * env * amp;
+    }
+  }
+
+  void kick(double t0) {
+    final i0 = (t0 * sr).round();
+    final len = (0.22 * sr).round();
+    double ph = 0;
+    for (int i = 0; i < len; i++) {
+      final t = i / sr;
+      ph += 2 * pi * (45 + 90 * exp(-t * 28)) / sr;
+      buf[(i0 + i) % n] += sin(ph) * exp(-t * 13) * 0.55;
+    }
+  }
+
+  void hit(double t0, double dur, double amp, double dec) {
+    final i0 = (t0 * sr).round();
+    final len = (dur * sr).round();
+    double prev = 0;
+    for (int i = 0; i < len; i++) {
+      final t = i / sr;
+      final x = noise();
+      buf[(i0 + i) % n] += (x - prev) * 0.5 * exp(-t * dec) * amp;
+      prev = x;
+    }
+  }
+
+  // A minor - F - C - G
+  const chords = [
+    [220.0, 261.63, 329.63],
+    [174.61, 220.0, 261.63],
+    [261.63, 329.63, 392.0],
+    [196.0, 246.94, 293.66],
+  ];
+  const roots = [110.0, 87.31, 130.81, 98.0];
+  const mel = <List<double>>[
+    [659.25, 0, 587.33, 0, 523.25, 0, 587.33, 0],
+    [523.25, 0, 440.0, 0, 523.25, 587.33, 523.25, 0],
+    [659.25, 0, 783.99, 0, 659.25, 0, 587.33, 523.25],
+    [587.33, 0, 659.25, 0, 587.33, 0, 493.88, 0],
+  ];
+  const arpHome = [0, 1, 2, 1, 0, 1, 2, 1];
+  const arpGame = [0, 1, 2, 1, 2, 1, 0, 1, 2, 1, 2, 1, 0, 2, 1, 2];
+
+  for (int b = 0; b < bars; b++) {
+    final c = b % 4;
+    final t0 = b * 4 * beat;
+    final ch = chords[c];
+    final root = roots[c];
+    final second = b >= 4; // second half of the loop adds a melody
+
+    for (final f in ch) {
+      tone(t0, beat * 4, f, game ? 0.055 : 0.11, 0, 0); // pad
+    }
+
+    if (!game) {
+      tone(t0, beat * 2, root, 0.30, 0, 1.3);
+      tone(t0 + beat * 2, beat * 2, root, 0.22, 0, 1.3);
+      for (int k = 0; k < 8; k++) {
+        tone(t0 + k * beat / 2, beat * 0.9, ch[arpHome[k]] * 2, 0.15, 1, 4.5);
+      }
+      if (second) {
+        for (int k = 0; k < 8; k++) {
+          final f = mel[c][k];
+          if (f > 0) tone(t0 + k * beat / 2, beat * 0.9, f, 0.14, 0, 2.5);
+        }
+      }
+    } else {
+      for (int k = 0; k < 4; k++) {
+        kick(t0 + k * beat);
+      }
+      hit(t0 + beat, 0.16, 0.22, 20);
+      hit(t0 + 3 * beat, 0.16, 0.22, 20);
+      for (int k = 0; k < 8; k++) {
+        final ts = t0 + k * beat / 2;
+        if (k.isOdd) hit(ts, 0.05, 0.10, 70);
+        final oct = (k == 3 || k == 7) ? 2.0 : 1.0;
+        tone(ts, beat * 0.45, root * 2 * oct, 0.17, 2, 5);
+      }
+      for (int k = 0; k < 16; k++) {
+        tone(t0 + k * beat / 4, beat * 0.22, ch[arpGame[k]] * 2, 0.07, 2, 10);
+      }
+      if (second) {
+        for (int k = 0; k < 8; k++) {
+          final f = mel[c][k];
+          if (f > 0) tone(t0 + k * beat / 2, beat * 0.9, f, 0.10, 1, 3);
+        }
+      }
+    }
+  }
+
+  double peak = 0;
+  for (final v in buf) {
+    final a = v.abs();
+    if (a > peak) peak = a;
+  }
+  final gain = peak > 0 ? 0.85 / peak : 1.0;
+  final data = ByteData(44 + n * 2);
+  void w(int o, String t) {
+    for (int i = 0; i < t.length; i++) {
+      data.setUint8(o + i, t.codeUnitAt(i));
+    }
+  }
+
+  w(0, 'RIFF');
+  data.setUint32(4, 36 + n * 2, Endian.little);
+  w(8, 'WAVE');
+  w(12, 'fmt ');
+  data.setUint32(16, 16, Endian.little);
+  data.setUint16(20, 1, Endian.little);
+  data.setUint16(22, 1, Endian.little);
+  data.setUint32(24, sr, Endian.little);
+  data.setUint32(28, sr * 2, Endian.little);
+  data.setUint16(32, 2, Endian.little);
+  data.setUint16(34, 16, Endian.little);
+  w(36, 'data');
+  data.setUint32(40, n * 2, Endian.little);
+  for (int i = 0; i < n; i++) {
+    data.setInt16(44 + i * 2, (buf[i] * gain * 32767).round().clamp(-32767, 32767), Endian.little);
+  }
+  return data.buffer.asUint8List();
 }
 
 // ================================================================ models
@@ -211,6 +447,10 @@ class Snake {
   double speedMul = 1.0;
   double turnMul = 1.0;
   double coolT = 0, huntT = 0; // attack cooldown / how long it has been hunting
+  bool avoiding = false; // LAG FIX: bot was steering away from a body on its last scan
+
+  // LAG FIX: bounding box of the whole body (used to skip far snakes quickly in collisions and drawing)
+  double minX = -1e9, minY = -1e9, maxX = 1e9, maxY = 1e9;
 
   Snake({required this.isPlayer, required this.name, required this.color, required Offset start, this.skin = 0}) {
     reset(start);
@@ -221,6 +461,29 @@ class Snake {
   double get spacing => radius * 0.55;
   int get score => ((len - 12) * 10).floor();
 
+  void updateBounds() {
+    if (body.isEmpty) return;
+    double x0 = body[0].dx, x1 = x0, y0 = body[0].dy, y1 = y0;
+    for (int i = 1; i < body.length; i++) {
+      final p = body[i];
+      final x = p.dx, y = p.dy;
+      if (x < x0) {
+        x0 = x;
+      } else if (x > x1) {
+        x1 = x;
+      }
+      if (y < y0) {
+        y0 = y;
+      } else if (y > y1) {
+        y1 = y;
+      }
+    }
+    minX = x0;
+    maxX = x1;
+    minY = y0;
+    maxY = y1;
+  }
+
   // make the snake longer right away (used for the big starting snakes)
   void grow(double l) {
     len = l;
@@ -228,6 +491,7 @@ class Snake {
     while (body.length < len.floor()) {
       body.add(body.last - dir * spacing);
     }
+    updateBounds();
   }
 
   void reset(Offset start) {
@@ -238,6 +502,7 @@ class Snake {
     speedT = magnetT = shieldT = 0;
     coolT = 0;
     huntT = 0;
+    avoiding = false;
     angle = rnd.nextDouble() * 2 * pi;
     target = angle;
     body.clear();
@@ -245,6 +510,7 @@ class Snake {
     for (int i = 0; i < 12; i++) {
       body.add(start - dir * (spacing * i));
     }
+    updateBounds();
   }
 
   void move(double dt) {
@@ -254,10 +520,16 @@ class Snake {
     final sp = (boosting ? kBoostSpeed : kBaseSpeed) * (speedT > 0 ? 1.3 : 1.0) * speedMul;
     body[0] = body[0] + Offset(cos(angle), sin(angle)) * sp * dt;
     final sc = spacing;
+    final sc2 = sc * sc;
+    // LAG FIX: no temporary Offsets / sqrt unless the segment really has to move
     for (int i = 1; i < body.length; i++) {
-      final d = body[i - 1] - body[i];
-      final dist = d.distance;
-      if (dist > sc) body[i] = body[i - 1] - d / dist * sc;
+      final a = body[i - 1], b = body[i];
+      final dx = a.dx - b.dx, dy = a.dy - b.dy;
+      final d2 = dx * dx + dy * dy;
+      if (d2 > sc2) {
+        final k = sc / sqrt(d2);
+        body[i] = Offset(a.dx - dx * k, a.dy - dy * k);
+      }
     }
     while (body.length < len.floor()) body.add(body.last);
     while (body.length > max(10, len.floor())) body.removeLast();
@@ -271,7 +543,7 @@ class GamePage extends StatefulWidget {
   State<GamePage> createState() => _GamePageState();
 }
 
-class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin {
+class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   late final Ticker ticker;
   Duration last = Duration.zero;
   final FocusNode gameFocus = FocusNode();
@@ -290,6 +562,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   int nextId = 1, myNetId = -1;
   double _sendAcc = 0, clientTarget = 0;
   final Set<int> attackers = {}; // bots that are allowed to attack right now
+  final Map<int, int> attackRank = {}; // HARD: role of every attacking bot (0 interceptor, 1/2 flankers, 3 cutter)
   double _slotAcc = 0, graceT = 10;
   int revivesLeft = kMaxRevives;
   List<List<dynamic>> _boardCache = [];
@@ -302,6 +575,10 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   String hostIp = '';
   String? netMsg;
   SharedPreferences? prefs;
+
+  // LAG FIX helpers
+  int _frame = 0; // frame counter (bots scan for obstacles every 2nd frame)
+  final Map<int, List<Food>> _foodGrid = {}; // food grid is reused every frame (no new lists)
 
   Screen screen = Screen.home;
   final List<Food> foods = [];
@@ -332,6 +609,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   static const colorChoices = [Colors.greenAccent, ...palette];
   int colorIdx = 0, skin = 0, mapChoice = 1;
   bool showNames = true, showBoard = true, sound = true, showArrow = true, joystick = true; // joystick is ON by default
+  bool music = true; // background music on / off
   int lastScore = 0, lastKills = 0, bestScore = 0, bestKills = 0;
 
   Color get playerColor => colorChoices[colorIdx];
@@ -351,6 +629,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     player = Snake(isPlayer: true, name: 'You', color: playerColor, start: const Offset(2500, 2500));
     ticker = createTicker(_tick)..start();
     _load();
@@ -362,6 +641,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _leaveNet();
     homeScroll.dispose();
     moreBelow.dispose();
@@ -370,6 +650,16 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     gameFocus.dispose();
     nameCtrl.dispose();
     super.dispose();
+  }
+
+  // music stops when the app goes to the background and continues when you come back
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      Music.resume();
+    } else {
+      Music.pause();
+    }
   }
 
   // ---------------------------------------------------------------- save / load
@@ -392,7 +682,10 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
         ipCtrl.text = p.getString('lastIp') ?? '';
         difficulty = (p.getInt('difficulty') ?? 1).clamp(0, 2);
         Sfx.enabled = sound;
+        music = p.getBool('music') ?? true;
+        Music.enabled = music;
       });
+      Music.sync();
     } catch (_) {}
   }
 
@@ -408,6 +701,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       p.setBool('showNames', showNames);
       p.setBool('showBoard', showBoard);
       p.setBool('sound', sound);
+      p.setBool('music', music);
       p.setBool('joystickOn', joystick);
       p.setBool('showArrow', showArrow);
       p.setString('name', nameCtrl.text.trim());
@@ -595,7 +889,9 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
 
   void _kill(Snake s) {
     s.alive = false;
-    for (int i = 0; i < s.body.length; i += 2) {
+    // LAG FIX: a giant snake (1200+ long) drops at most ~600 foods instead of thousands
+    final dropStep = max(2, (s.body.length / 600).ceil());
+    for (int i = 0; i < s.body.length; i += dropStep) {
       final p = s.body[i] + Offset(rnd.nextDouble() * 10 - 5, rnd.nextDouble() * 10 - 5);
       foods.add(Food(p, 10 + rnd.nextDouble() * 3, rnd.nextInt(foodTypes)));
     }
@@ -631,6 +927,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
         if (o == s || !o.alive) continue;
         final human = o.isPlayer || o.remote;
         if (human && (graceT > 0 || !attackers.contains(s.id))) continue; // only a few bots attack at a time
+        if (human && difficulty == 2 && o.shieldT > 1.0) continue; // hard: do not waste an attack on a shielded player, wait
         if (!human && difficulty == 2 && s.id % 4 != 0) continue; // hard: only some bots hunt other bots
         if (!human && o.len > s.len * 1.8 + 20) continue; // bots avoid much bigger bots
         if (!human && o.len < s.len * 0.4) continue; // big bots do not chase tiny snakes (too risky)
@@ -649,18 +946,29 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     }
 
     // 3) avoid crashing into bodies (the prey's head area is ignored while attacking)
-    for (final o in snakes) {
-      if (o == s || !o.alive) continue;
-      if ((o.head - h).distance > 700) continue;
-      for (int i = (o == prey ? 8 : 0); i < o.body.length; i += 3) {
-        final p = o.body[i];
-        final d = p - h;
-        final margin = (o == prey && difficulty == 2) ? 16.0 : 70 + min(s.len, 300.0) * 0.25;
-        if (d.distance < s.radius + o.radius + margin) {
-          final toP = atan2(d.dy, d.dx);
-          if (wrapAngle(toP - s.angle).abs() < 1.6) {
-            s.target = toP + (wrapAngle(toP - s.angle) >= 0 ? -1.3 : 1.3);
-            return;
+    // LAG FIX: each bot scans only every 2nd frame (bots are staggered by id). On the other frame
+    // it keeps its last avoid direction, so the steering looks exactly the same.
+    if (((_frame + s.id) & 1) == 1) {
+      if (s.avoiding) return;
+    } else {
+      s.avoiding = false;
+      for (final o in snakes) {
+        if (o == s || !o.alive) continue;
+        final hd = o.head - h;
+        if (hd.dx * hd.dx + hd.dy * hd.dy > 490000) continue; // 700 * 700
+        final margin = (o == prey && difficulty == 2) ? 22.0 : 70 + min(s.len, 300.0) * 0.25;
+        final lim = s.radius + o.radius + margin;
+        final lim2 = lim * lim;
+        for (int i = (o == prey ? 8 : 0); i < o.body.length; i += 3) {
+          final p = o.body[i];
+          final d = p - h;
+          if (d.dx * d.dx + d.dy * d.dy < lim2) {
+            final toP = atan2(d.dy, d.dx);
+            if (wrapAngle(toP - s.angle).abs() < 1.6) {
+              s.target = toP + (wrapAngle(toP - s.angle) >= 0 ? -1.3 : 1.3);
+              s.avoiding = true;
+              return;
+            }
           }
         }
       }
@@ -686,20 +994,57 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
           ? (dist / kBoostSpeed * ((prey.boosting ? kBoostSpeed : kBaseSpeed) * (prey.speedT > 0 ? 1.3 : 1.0)) * 1.15).clamp(100.0, 700.0)
           : (dist * 0.5).clamp(60.0, 260.0)); // easy bots just chase the head
       var aim = ph + pdir * lead;
-      var behindPrey = false;
+      var hardBoost = false;
       if (hardHunt) {
+        // HARD: the attackers work as a TEAM, every one has a different job (rank 0..3)
+        final rank = attackRank[s.id] ?? 0;
         final perp = Offset(-pdir.dy, pdir.dx);
         final rel = h - ph;
         final behind = pdir.dx * rel.dx + pdir.dy * rel.dy < 0;
-        behindPrey = behind;
         final side = (pdir.dx * rel.dy - pdir.dy * rel.dx) >= 0 ? 1.0 : -1.0;
-        if (behind && dist > 160) {
-          aim = aim + perp * side * (prey.radius * 2.2 + 30); // run alongside to get in front
-        } else if (!behind && dist < 700) {
-          // already in front: swing across the player's path, our body becomes a wall in front of his head
-          aim = ph + pdir * lead - perp * side * 260;
+        // where will the player be when we arrive? (uses his speed AND the way he is steering)
+        final preySp = (prey.boosting ? kBoostSpeed : kBaseSpeed) * (prey.speedT > 0 ? 1.3 : 1.0);
+        final tArr = (dist / kBoostSpeed).clamp(0.2, 2.5).toDouble();
+        final turn = wrapAngle(prey.target - prey.angle).clamp(-4.2 * tArr, 4.2 * tArr).toDouble();
+        final midA = prey.angle + turn * 0.5;
+        var pred = ph + Offset(cos(midA), sin(midA)) * (preySp * tArr);
+        pred = Offset(pred.dx.clamp(250.0, worldSize - 250), pred.dy.clamp(250.0, worldSize - 250));
+        if (rank == 0) {
+          // INTERCEPTOR: get in front of his head, then cross his path (our body becomes a wall)
+          if (behind && dist > 160) {
+            aim = pred + perp * side * (prey.radius * 2.2 + 30);
+            hardBoost = dist < 700;
+          } else if (!behind && dist < 700) {
+            aim = pred - perp * side * 260;
+            hardBoost = true;
+          } else {
+            aim = pred;
+            hardBoost = dist < 450;
+          }
+        } else if (rank == 1 || rank == 2) {
+          // FLANKERS: one comes from his left, one from his right, then both swing across in front (pincer)
+          final sg = rank == 1 ? 1.0 : -1.0;
+          if (dist > 320) {
+            aim = pred + perp * sg * 240;
+            hardBoost = dist < 800;
+          } else {
+            aim = pred + pdir * 50 - perp * sg * 260;
+            hardBoost = true;
+          }
+        } else if (rank == 3) {
+          // CUTTER: runs far ahead and lays its body across his path, so he cannot run straight
+          var cut = ph + pdir * (preySp * 1.8 + 300);
+          cut = Offset(cut.dx.clamp(250.0, worldSize - 250), cut.dy.clamp(250.0, worldSize - 250));
+          final dc = (cut - h).distance;
+          if (dc > 260) {
+            aim = cut;
+            hardBoost = dc < 900 && dist > 250;
+          } else {
+            aim = cut + perp * side * 420;
+          }
         } else {
-          aim = aim + perp * (((s.id % 3) - 1) * 90.0); // every bot cuts in from a different angle
+          aim = pred;
+          hardBoost = dist < 450;
         }
       }
       var a = atan2(aim.dy - h.dy, aim.dx - h.dx);
@@ -713,7 +1058,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       final human = prey.isPlayer || prey.remote;
       if (human && dist > 450) s.speedMul = chaseSpeed; // a little faster when running down a player
       final wantBoost = hardHunt
-          ? ((behindPrey && dist < 700 && s.len > 22) || (dist < 450 && s.len > 18)) // boost only to get in front / finish the cut
+          ? (hardBoost && s.len > 18) // boost only for the job of its role (get in front / finish the cut)
           : ((dist < boostNear && s.len > 18) || (farBoost && human && dist < 1800 && s.len > 22));
       s.boosting = wantBoost && wrapAngle(a - s.angle).abs() < (hardHunt ? 1.3 : 0.8);
       return;
@@ -745,6 +1090,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     if (_slotAcc < 0.4) return;
     _slotAcc = 0;
     attackers.clear();
+    attackRank.clear();
     final humans = snakes.where((s) => s.alive && (s.isPlayer || s.remote)).toList();
     if (humans.isEmpty) return;
     final cands = <MapEntry<double, Snake>>[];
@@ -762,10 +1108,12 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     final k = maxHunters * humans.length;
     for (int i = 0; i < cands.length && i < k; i++) {
       attackers.add(cands[i].value.id);
+      attackRank[cands[i].value.id] = i;
     }
   }
 
   void _update(double dt) {
+    _frame++;
     graceT = max(0.0, graceT - dt);
     _assignAttackers(dt);
     for (final s in snakes) {
@@ -820,9 +1168,17 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       }
     }
 
+    // LAG FIX: body bounding boxes (after everybody moved / respawned) for fast collision + drawing checks
+    for (final s in snakes) {
+      if (s.alive) s.updateBounds();
+    }
+
     // eat food: foods are put in a coarse grid, so every snake only checks the foods near its head
     const gc = 200.0;
-    final grid = <int, List<Food>>{};
+    final grid = _foodGrid;
+    for (final l in grid.values) {
+      l.clear(); // LAG FIX: reuse the lists instead of creating new ones every frame
+    }
     for (final f in foods) {
       final key = (f.pos.dx / gc).floor() * 1000 + (f.pos.dy / gc).floor();
       (grid[key] ??= <Food>[]).add(f);
@@ -876,8 +1232,9 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       if (!dead && s.shieldT <= 0) {
         for (final o in snakes) {
           if (o == s || !o.alive) continue;
-          if ((o.head - h).distance > o.body.length * o.spacing + 100) continue;
           final limit = min(s.radius * 0.7, 10.0) + o.radius * 0.8;
+          // LAG FIX: head is outside the other snake's bounding box -> it cannot touch it
+          if (h.dx < o.minX - limit || h.dx > o.maxX + limit || h.dy < o.minY - limit || h.dy > o.maxY + limit) continue;
           final limit2 = limit * limit;
           final sp = max(o.spacing, 1.0);
           final pts = o.body;
@@ -924,6 +1281,8 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   // ================================================================ UI
   @override
   Widget build(BuildContext context) {
+    final wantMusic = screen == Screen.home ? 1 : 2;
+    if (wantMusic != Music.want) Music.play(wantMusic);
     return Scaffold(
       backgroundColor: const Color(0xFF0B0B16),
       body: Focus(
@@ -1373,6 +1732,11 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   void _settingsSheet() {
     _sheet('Settings', (setD) {
       return [
+        _sw('Music', Icons.music_note, music, (x) {
+          music = x;
+          Music.enabled = x;
+          Music.sync();
+        }, setD),
         _sw('Sound effects', Icons.volume_up, sound, (x) {
           sound = x;
           Sfx.enabled = x;
@@ -1721,6 +2085,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
           s.body[i] = Offset.lerp(s.body[i], n[i], k)!;
         }
       }
+      s.updateBounds(); // LAG FIX: keeps the drawing culling correct on the client too
     }
     if (player.alive && player.body.isNotEmpty && snakes.contains(player)) {
       if (firstSnap) {
@@ -2329,8 +2694,12 @@ class GamePainter extends CustomPainter {
     canvas.drawRect(world, paint);
     paint.style = PaintingStyle.fill;
 
-    // food (plain dots when zoomed out: much cheaper)
-    final simpleFood = scale < 0.5;
+    // food (plain dots when zoomed out or when very many foods are on screen: much cheaper)
+    int visFood = 0;
+    for (final f in g.foods) {
+      if (view.contains(f.pos)) visFood++;
+    }
+    final simpleFood = scale < 0.5 || visFood > 150;
     for (final f in g.foods) {
       if (!view.contains(f.pos)) continue;
       if (simpleFood) {
@@ -2355,12 +2724,13 @@ class GamePainter extends CustomPainter {
       if (!s.alive) continue;
       final r = s.radius;
       final n = s.body.length;
-      // snakes that are completely out of sight are not drawn at all
-      if ((s.head - view.center).distance > view.longestSide / 2 + n * s.spacing + r * 3 + 100) continue;
+      // snakes that are completely out of sight are not drawn at all (uses the real body bounding box)
+      final pad = r * 3 + 20;
+      if (s.maxX + pad < view.left || s.minX - pad > view.right || s.maxY + pad < view.top || s.minY - pad > view.bottom) continue;
       final nowSec = DateTime.now().millisecondsSinceEpoch / 1000.0;
       // level of detail: long snakes / zoomed-out view draw fewer legs and segments
-      final legStep = (n > 100 || scale < 0.4) ? 4 : 2;
-      final bodyStep = n > 140 ? 2 : 1;
+      final legStep = n > 300 ? 6 : ((n > 100 || scale < 0.4) ? 4 : 2);
+      final bodyStep = n > 300 ? 3 : (n > 100 ? 2 : 1);
       final outline = r * scale > 4.5;
       final boosted = s.boosting || s.speedT > 0;
       drawCentipedeLegs(canvas, s.body, r, nowSec,
@@ -2597,7 +2967,7 @@ class SnakePreviewPainter extends CustomPainter {
     var dir = head - pts[2];
     dir = dir / dir.distance;
     final perp = Offset(-dir.dy, dir.dx);
-    for (final side in [-1.0, 1.0]) {
+    for (final side in const [-1.0, 1.0]) {
       final e = head + dir * r * 0.45 + perp * r * 0.5 * side;
       p.color = Colors.white;
       canvas.drawCircle(e, r * 0.36, p);
@@ -2880,7 +3250,7 @@ void drawCentipedeLegs(Canvas canvas, List<Offset> pts, double r, double t, {Rec
     d = d / dl;
     final perp = Offset(-d.dy, d.dx);
     final swing = sin(t * 9 + i * 0.7) * r * 0.5;
-    for (final side in [-1.0, 1.0]) {
+    for (final side in const [-1.0, 1.0]) {
       final start = c + perp * side * r * 0.5;
       final tip = c + perp * side * r * 1.75 + d * swing * side;
       canvas.drawLine(start, tip, p);
@@ -2893,7 +3263,7 @@ void drawCentipedeLegs(Canvas canvas, List<Offset> pts, double r, double t, {Rec
   if (hl > 0.001) {
     hd = hd / hl;
     final hp = Offset(-hd.dy, hd.dx);
-    for (final side in [-1.0, 1.0]) {
+    for (final side in const [-1.0, 1.0]) {
       canvas.drawLine(pts[0] + hd * r * 0.8 + hp * side * r * 0.3, pts[0] + hd * r * 2.0 + hp * side * r * 0.9, p);
     }
     // pincers
@@ -2902,7 +3272,7 @@ void drawCentipedeLegs(Canvas canvas, List<Offset> pts, double r, double t, {Rec
       ..strokeCap = StrokeCap.round
       ..strokeWidth = max(2.5, r * 0.3)
       ..color = p.color;
-    for (final side in [-1.0, 1.0]) {
+    for (final side in const [-1.0, 1.0]) {
       canvas.drawLine(pts[0] + hd * r * 0.85 + hp * side * r * 0.45, pts[0] + hd * r * 1.5 + hp * side * r * 0.12, fang);
     }
   }
