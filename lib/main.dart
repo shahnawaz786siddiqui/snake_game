@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'dart:io' show HttpServer, InternetAddress, InternetAddressType, NetworkInterface, WebSocket, WebSocketTransformer;
 import 'dart:math';
 import 'dart:typed_data';
+import 'dart:ui' show PointMode;
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart' show kIsWeb, kReleaseMode, defaultTargetPlatform, TargetPlatform, compute;
 import 'package:flutter/gestures.dart';
@@ -146,7 +147,7 @@ class Sfx {
 
   static void eat() {
     final now = DateTime.now().millisecondsSinceEpoch;
-    if (now - _lastEat < 170) return; // LAG FIX: fewer audio calls while eating a lot
+    if (now - _lastEat < 260) return; // LAG FIX: fewer audio calls while eating a lot
     _lastEat = now;
     _play(_a, _eat);
   }
@@ -2661,6 +2662,40 @@ class GamePainter extends CustomPainter {
     return tp;
   }
 
+  // draws the visible beads of a big snake: ONE call for the dark outline, then ONE call per colour
+  static void _bodyBatched(Canvas canvas, Snake s, double r, double scale, int step, bool boosted, Rect view) {
+    final pts = s.body;
+    final n = pts.length;
+    final all = <Offset>[];
+    final groups = <int, List<Offset>>{};
+    final colors = <int, Color>{};
+    for (int i = n - 1; i > 0; i -= step) {
+      final p = pts[i];
+      if (!view.contains(p)) continue;
+      var col = skinColor(s.skin, s.color, i, n);
+      if (boosted) col = Color.lerp(col, Colors.white, 0.25)!;
+      final key = col.value & 0xF8F8F8F8; // similar colours share one call
+      (groups[key] ??= <Offset>[]).add(p);
+      colors.putIfAbsent(key, () => col);
+      all.add(p);
+    }
+    if (all.isEmpty) return;
+    final dp = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round;
+    if (r * scale > 4.5) {
+      dp
+        ..strokeWidth = (r + max(1.5, r * 0.12) * 0.5) * 2
+        ..color = Color.lerp(s.color, Colors.black, 0.6)!;
+      canvas.drawPoints(PointMode.points, all, dp);
+    }
+    dp.strokeWidth = r * 2;
+    groups.forEach((k, list) {
+      dp.color = colors[k]!;
+      canvas.drawPoints(PointMode.points, list, dp);
+    });
+  }
+
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint();
@@ -2754,8 +2789,13 @@ class GamePainter extends CustomPainter {
         }
       }
 
-      for (int i = n - 1; i > 0; i -= bodyStep) {
-        seg(i);
+      if (n > 120) {
+        // LAG FIX: big snake = a few draw calls (one per colour) instead of hundreds of single circles
+        _bodyBatched(canvas, s, r, scale, bodyStep, boosted, view);
+      } else {
+        for (int i = n - 1; i > 0; i -= bodyStep) {
+          seg(i);
+        }
       }
       seg(0);
       final h = s.head;
@@ -3240,7 +3280,9 @@ void drawCentipedeLegs(Canvas canvas, List<Offset> pts, double r, double t, {Rec
     ..strokeCap = StrokeCap.round
     ..strokeWidth = max(2.0, r * 0.22)
     ..color = legColor ?? const Color(0xFF5A2A0B);
-  final foot = Paint()..color = Color.lerp(legColor ?? const Color(0xFF5A2A0B), Colors.black, 0.4)!;
+  final footColor = Color.lerp(legColor ?? const Color(0xFF5A2A0B), Colors.black, 0.4)!;
+  final lines = <Offset>[]; // LAG FIX: collected first, drawn in two calls at the end
+  final feet = <Offset>[];
   for (int i = 1; i < pts.length - 1; i += step) {
     final c = pts[i];
     if (view != null && !view.contains(c)) continue;
@@ -3253,9 +3295,19 @@ void drawCentipedeLegs(Canvas canvas, List<Offset> pts, double r, double t, {Rec
     for (final side in const [-1.0, 1.0]) {
       final start = c + perp * side * r * 0.5;
       final tip = c + perp * side * r * 1.75 + d * swing * side;
-      canvas.drawLine(start, tip, p);
-      canvas.drawCircle(tip, p.strokeWidth * 0.7, foot);
+      lines.add(start);
+      lines.add(tip);
+      feet.add(tip);
     }
+  }
+  if (lines.isNotEmpty) {
+    canvas.drawPoints(PointMode.lines, lines, p);
+    final foot = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeWidth = p.strokeWidth * 1.4
+      ..color = footColor;
+    canvas.drawPoints(PointMode.points, feet, foot);
   }
   // antennae
   var hd = pts[0] - pts[2];
@@ -3490,9 +3542,10 @@ void _bgSpace(Canvas canvas, Rect v, double t, double dn, bool fine) {
     if (h > 0.65) return;
     final col = neb[(hash2(cx, cy, 2) * 4).floor() % 4];
     final r = 260 + h * 300;
-    for (int k = 0; k < 4; k++) {
-      p.color = col.withOpacity(0.07);
-      canvas.drawCircle(o, r * (1 - k * 0.22), p);
+    final layers = fine ? 4 : 2; // zoomed out: 2 layers are enough (half the GPU work)
+    for (int k = 0; k < layers; k++) {
+      p.color = col.withOpacity(fine ? 0.07 : 0.10);
+      canvas.drawCircle(o, r * (1 - k * (fine ? 0.22 : 0.44)), p);
     }
   });
 
