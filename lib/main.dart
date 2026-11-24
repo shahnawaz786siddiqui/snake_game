@@ -38,13 +38,13 @@ enum NetRole { none, host, client }
 int difficulty = 1;
 const diffNames = ['Easy', 'Medium', 'Hard'];
 double get huntShare => const [0.25, 0.7, 0.95][difficulty]; // fraction of bots that hunt
-double get chaseRange => const [600.0, 900.0, 1500.0][difficulty]; // how far bots spot a player
-double get chaseSpeed => const [1.0, 1.08, 1.0][difficulty]; // bot speed while chasing a player
+double get chaseRange => const [600.0, 900.0, 1900.0][difficulty]; // how far bots spot a player
+double get chaseSpeed => const [1.0, 1.08, 1.06][difficulty]; // bot speed while chasing a player
 double get boostNear => const [250.0, 480.0, 420.0][difficulty]; // distance where bots boost
 bool get farBoost => difficulty == 2; // hard bots also boost from far away
 double get botGrowth => const [0.8, 1.25, 3.2][difficulty]; // how fast bots grow when they eat
 double get botBoostCost => const [5.0, 5.0, 1.5][difficulty]; // length a bot loses per second of boost
-int get maxHunters => const [1, 2, 4][difficulty]; // how many bots may attack you at the same time
+int get maxHunters => const [1, 2, 5][difficulty]; // how many bots may attack you at the same time
 double get startGrace => const [12.0, 12.0, 10.0][difficulty]; // seconds at the start with no attack
 double newAggr() => rnd.nextDouble() < huntShare ? 0.6 + rnd.nextDouble() * 0.4 : rnd.nextDouble() * 0.45;
 
@@ -563,7 +563,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   int nextId = 1, myNetId = -1;
   double _sendAcc = 0, clientTarget = 0;
   final Set<int> attackers = {}; // bots that are allowed to attack right now
-  final Map<int, int> attackRank = {}; // HARD: role of every attacking bot (0 interceptor, 1/2 flankers, 3 cutter)
+  final Map<int, int> attackRank = {}; // HARD: role of every attacking bot (0 interceptor, 1/2 flankers, 3/4 cutters, 5+ chasers)
   double _slotAcc = 0, graceT = 10;
   int revivesLeft = kMaxRevives;
   List<List<dynamic>> _boardCache = [];
@@ -928,7 +928,6 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
         if (o == s || !o.alive) continue;
         final human = o.isPlayer || o.remote;
         if (human && (graceT > 0 || !attackers.contains(s.id))) continue; // only a few bots attack at a time
-        if (human && difficulty == 2 && o.shieldT > 1.0) continue; // hard: do not waste an attack on a shielded player, wait
         if (!human && difficulty == 2 && s.id % 4 != 0) continue; // hard: only some bots hunt other bots
         if (!human && o.len > s.len * 1.8 + 20) continue; // bots avoid much bigger bots
         if (!human && o.len < s.len * 0.4) continue; // big bots do not chase tiny snakes (too risky)
@@ -950,25 +949,36 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     // LAG FIX: each bot scans only every 2nd frame (bots are staggered by id). On the other frame
     // it keeps its last avoid direction, so the steering looks exactly the same.
     if (((_frame + s.id) & 1) == 1) {
-      if (s.avoiding) return;
+      if (s.avoiding) {
+        if (difficulty == 2) s.turnMul = 2.0; // hard: keep turning sharply while dodging
+        return;
+      }
     } else {
       s.avoiding = false;
-      for (final o in snakes) {
-        if (o == s || !o.alive) continue;
-        final hd = o.head - h;
-        if (hd.dx * hd.dx + hd.dy * hd.dy > 490000) continue; // 700 * 700
-        final margin = (o == prey && difficulty == 2) ? 22.0 : 70 + min(s.len, 300.0) * 0.25;
-        final lim = s.radius + o.radius + margin;
-        final lim2 = lim * lim;
-        for (int i = (o == prey ? 8 : 0); i < o.body.length; i += 3) {
-          final p = o.body[i];
-          final d = p - h;
-          if (d.dx * d.dx + d.dy * d.dy < lim2) {
-            final toP = atan2(d.dy, d.dx);
-            if (wrapAngle(toP - s.angle).abs() < 1.6) {
-              s.target = toP + (wrapAngle(toP - s.angle) >= 0 ? -1.3 : 1.3);
-              s.avoiding = true;
-              return;
+      if (difficulty == 2) {
+        // HARD: the smart dodge (looks at the WHOLE body of every snake, picks the side with free space)
+        if (_hardAvoid(s, prey)) {
+          s.avoiding = true;
+          return;
+        }
+      } else {
+        for (final o in snakes) {
+          if (o == s || !o.alive) continue;
+          final hd = o.head - h;
+          if (hd.dx * hd.dx + hd.dy * hd.dy > 490000) continue; // 700 * 700
+          final margin = (o == prey && difficulty == 2) ? 22.0 : 70 + min(s.len, 300.0) * 0.25;
+          final lim = s.radius + o.radius + margin;
+          final lim2 = lim * lim;
+          for (int i = (o == prey ? 8 : 0); i < o.body.length; i += 3) {
+            final p = o.body[i];
+            final d = p - h;
+            if (d.dx * d.dx + d.dy * d.dy < lim2) {
+              final toP = atan2(d.dy, d.dx);
+              if (wrapAngle(toP - s.angle).abs() < 1.6) {
+                s.target = toP + (wrapAngle(toP - s.angle) >= 0 ? -1.3 : 1.3);
+                s.avoiding = true;
+                return;
+              }
             }
           }
         }
@@ -982,7 +992,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       s.huntT += dt;
       if ((prey.isPlayer || prey.remote) && (dist < 170 || s.huntT > (difficulty == 2 ? 18 : 14))) {
         // attack finished: back off for a while so the player can breathe
-        final cd = difficulty == 2 ? 4.0 : 6.0; // hard: shorter break between attacks
+        final cd = difficulty == 2 ? 2.2 : 6.0; // hard: very short break between attacks
         s.coolT = cd + rnd.nextDouble() * cd * 0.6;
         s.huntT = 0;
       }
@@ -1013,7 +1023,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
         if (rank == 0) {
           // INTERCEPTOR: get in front of his head, then cross his path (our body becomes a wall)
           if (behind && dist > 160) {
-            aim = pred + perp * side * (prey.radius * 2.2 + 30);
+            aim = pred + perp * side * (prey.radius * 2.6 + 40);
             hardBoost = dist < 700;
           } else if (!behind && dist < 700) {
             aim = pred - perp * side * 260;
@@ -1043,9 +1053,31 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
           } else {
             aim = cut + perp * side * 420;
           }
+        } else if (rank == 4) {
+          // SECOND CUTTER: lays a second wall, closer to him and on the other side (double wall)
+          var cut = ph + pdir * (preySp * 1.1 + 180);
+          cut = Offset(cut.dx.clamp(250.0, worldSize - 250), cut.dy.clamp(250.0, worldSize - 250));
+          final dc = (cut - h).distance;
+          if (dc > 240) {
+            aim = cut;
+            hardBoost = dc < 800 && dist > 250;
+          } else {
+            aim = cut - perp * side * 380;
+          }
         } else {
           aim = pred;
           hardBoost = dist < 450;
+        }
+        if (prey.shieldT > 1.0) {
+          // he has a shield: do NOT crash into him. Wait around him and strike the moment it ends
+          if (dist < 380) {
+            aim = h + (h - ph); // too close: back off
+          } else if (dist < 560) {
+            aim = ph + perp * side * 450; // circle around him
+          } else {
+            aim = pred;
+          }
+          hardBoost = dist > 900;
         }
       }
       var a = atan2(aim.dy - h.dy, aim.dx - h.dx);
@@ -1086,11 +1118,84 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     }
   }
 
+  // ---------------------------------------------------------------- HARD bots: smart body dodge
+  // free space around point q = distance to the nearest body of any other snake (or the map wall), capped
+  double _clear(Offset q, Snake self, double cap) {
+    double best = min(cap, min(min(q.dx, q.dy), min(worldSize - q.dx, worldSize - q.dy)));
+    for (final o in snakes) {
+      if (o == self || !o.alive) continue;
+      if (q.dx < o.minX - cap || q.dx > o.maxX + cap || q.dy < o.minY - cap || q.dy > o.maxY + cap) continue;
+      final sp = max(o.spacing, 1.0);
+      final pts = o.body;
+      int i = 0;
+      while (i < pts.length) {
+        final dx = pts[i].dx - q.dx, dy = pts[i].dy - q.dy;
+        final d = sqrt(dx * dx + dy * dy) - o.radius;
+        if (d < best) best = d;
+        final skip = ((d - best) / sp).floor(); // far points cannot be closer than the best one so far
+        i += skip > 1 ? skip : 1;
+      }
+    }
+    return best;
+  }
+
+  // true = a body is in front of this bot and it has to turn away now
+  bool _hardAvoid(Snake s, Snake? prey) {
+    final h = s.head;
+    for (final o in snakes) {
+      if (o == s || !o.alive) continue;
+      // body of the player is thick when he is big, so keep more distance from him
+      final margin = o == prey ? 26 + o.radius * 0.5 : 70 + min(s.len, 300.0) * 0.25;
+      final lim = s.radius + o.radius + margin;
+      // the WHOLE body counts, a long body can be very close even when its head is far away
+      if (h.dx < o.minX - lim - 40 || h.dx > o.maxX + lim + 40 || h.dy < o.minY - lim - 40 || h.dy > o.maxY + lim + 40) continue;
+      final lim2 = lim * lim;
+      final sp = max(o.spacing, 1.0);
+      final pts = o.body;
+      int i = o == prey ? 4 : 0; // only the head area of the prey is ignored (so we can still cut in front of it)
+      while (i < pts.length) {
+        final dx = pts[i].dx - h.dx, dy = pts[i].dy - h.dy;
+        final d2 = dx * dx + dy * dy;
+        if (d2 < lim2) {
+          if (wrapAngle(atan2(dy, dx) - s.angle).abs() < 1.7) {
+            _dodge(s, lim);
+            return true;
+          }
+          i++;
+          continue;
+        }
+        final skip = ((sqrt(d2) - lim) / sp).floor(); // body points are at most one spacing apart
+        i += skip > 1 ? skip : 1;
+      }
+    }
+    return false;
+  }
+
+  // turn to the side that has the most free space (also looks at the map walls); big U-turn only if needed
+  void _dodge(Snake s, double lim) {
+    final h = s.head;
+    final probe = lim * 1.2 + 40;
+    double bestA = s.angle, bestScore = -1e9;
+    for (final da in const [-1.3, -0.7, 0.7, 1.3, -2.3, 2.3]) {
+      final a = s.angle + da;
+      final q = h + Offset(cos(a), sin(a)) * probe;
+      final score = _clear(q, s, 500) - da.abs() * 15;
+      if (score > bestScore) {
+        bestScore = score;
+        bestA = a;
+      }
+    }
+    s.target = bestA;
+    s.turnMul = 2.0; // turn sharply
+    s.speedMul = 1.0;
+  }
+
   void _assignAttackers(double dt) {
     _slotAcc += dt;
     if (_slotAcc < 0.4) return;
     _slotAcc = 0;
     attackers.clear();
+    final oldRank = Map<int, int>.from(attackRank);
     attackRank.clear();
     final humans = snakes.where((s) => s.alive && (s.isPlayer || s.remote)).toList();
     if (humans.isEmpty) return;
@@ -1107,9 +1212,27 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     }
     cands.sort((a, b) => a.key.compareTo(b.key));
     final k = maxHunters * humans.length;
+    final chosen = <int>[];
     for (int i = 0; i < cands.length && i < k; i++) {
       attackers.add(cands[i].value.id);
-      attackRank[cands[i].value.id] = i;
+      chosen.add(cands[i].value.id);
+    }
+    final used = <int>{};
+    for (final id in chosen) {
+      final r = oldRank[id];
+      if (r != null && r < k && !used.contains(r)) {
+        attackRank[id] = r; // keeps its old job
+        used.add(r);
+      }
+    }
+    int free = 0;
+    for (final id in chosen) {
+      if (attackRank.containsKey(id)) continue;
+      while (used.contains(free)) {
+        free++;
+      }
+      attackRank[id] = free;
+      used.add(free);
     }
   }
 
