@@ -449,6 +449,7 @@ class Snake {
   double turnMul = 1.0;
   double coolT = 0, huntT = 0; // attack cooldown / how long it has been hunting
   bool avoiding = false; // LAG FIX: bot was steering away from a body on its last scan
+  double closeT = 0; // HARD: how long this bot has been right in the prey's face
 
   // LAG FIX: bounding box of the whole body (used to skip far snakes quickly in collisions and drawing)
   double minX = -1e9, minY = -1e9, maxX = 1e9, maxY = 1e9;
@@ -503,6 +504,7 @@ class Snake {
     speedT = magnetT = shieldT = 0;
     coolT = 0;
     huntT = 0;
+    closeT = 0;
     avoiding = false;
     angle = rnd.nextDouble() * 2 * pi;
     target = angle;
@@ -928,7 +930,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
         if (o == s || !o.alive) continue;
         final human = o.isPlayer || o.remote;
         if (human && (graceT > 0 || !attackers.contains(s.id))) continue; // only a few bots attack at a time
-        if (!human && difficulty == 2 && s.id % 4 != 0) continue; // hard: only some bots hunt other bots
+        if (!human && difficulty == 2 && (s.id % 4 != 0 || attackers.contains(s.id))) continue; // hard: only some bots hunt other bots, never the ones sent to attack the player
         if (!human && o.len > s.len * 1.8 + 20) continue; // bots avoid much bigger bots
         if (!human && o.len < s.len * 0.4) continue; // big bots do not chase tiny snakes (too risky)
         if (!human && s.len < 25) continue; // tiny bots first grow by eating
@@ -990,11 +992,23 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       final ph = prey.head;
       final dist = (ph - h).distance;
       s.huntT += dt;
-      if ((prey.isPlayer || prey.remote) && (dist < 170 || s.huntT > (difficulty == 2 ? 18 : 14))) {
-        // attack finished: back off for a while so the player can breathe
-        final cd = difficulty == 2 ? 2.2 : 6.0; // hard: very short break between attacks
-        s.coolT = cd + rnd.nextDouble() * cd * 0.6;
-        s.huntT = 0;
+      if (prey.isPlayer || prey.remote) {
+        bool done;
+        if (difficulty == 2) {
+          // HARD: being close is NOT the end of the attack, that is where the cut happens.
+          // The attack ends only after a long hunt, or 4 seconds in his face without success.
+          s.closeT = dist < 260 ? s.closeT + dt : max(0.0, s.closeT - dt);
+          done = s.closeT > 4.0 || s.huntT > 12;
+        } else {
+          done = dist < 170 || s.huntT > 14;
+        }
+        if (done) {
+          // attack finished: back off for a while so the player can breathe
+          final cd = difficulty == 2 ? 2.2 : 6.0; // hard: very short break between attacks
+          s.coolT = cd + rnd.nextDouble() * cd * 0.6;
+          s.huntT = 0;
+          s.closeT = 0;
+        }
       }
       final pdir = Offset(cos(prey.angle), sin(prey.angle));
       final isHuman = prey.isPlayer || prey.remote;
@@ -1098,6 +1112,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     }
 
     s.huntT = 0;
+    s.closeT = 0;
     // 5) no prey: look for food
     if (s.aiTimer <= 0) {
       s.aiTimer = 0.4 + rnd.nextDouble() * 0.8;
@@ -1139,32 +1154,36 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     return best;
   }
 
-  // true = a body is in front of this bot and it has to turn away now
+  // true = a body is really IN THE WAY of this bot (look-ahead corridor in front of its head) and it has to turn now
   bool _hardAvoid(Snake s, Snake? prey) {
     final h = s.head;
+    final ca = cos(s.angle), sa = sin(s.angle);
+    final look = 150.0 + s.radius * 2; // how far ahead the bot looks
     for (final o in snakes) {
       if (o == s || !o.alive) continue;
-      // body of the player is thick when he is big, so keep more distance from him
-      final margin = o == prey ? 26 + o.radius * 0.5 : 70 + min(s.len, 300.0) * 0.25;
-      final lim = s.radius + o.radius + margin;
+      // half width of the corridor (a bit narrower next to the prey so the bot can still cut in close)
+      final half = s.radius + o.radius * 0.8 + (o == prey ? 14.0 : 34.0);
+      final reach = look + half;
       // the WHOLE body counts, a long body can be very close even when its head is far away
-      if (h.dx < o.minX - lim - 40 || h.dx > o.maxX + lim + 40 || h.dy < o.minY - lim - 40 || h.dy > o.maxY + lim + 40) continue;
-      final lim2 = lim * lim;
+      if (h.dx < o.minX - reach || h.dx > o.maxX + reach || h.dy < o.minY - reach || h.dy > o.maxY + reach) continue;
+      final reach2 = reach * reach;
       final sp = max(o.spacing, 1.0);
       final pts = o.body;
       int i = o == prey ? 4 : 0; // only the head area of the prey is ignored (so we can still cut in front of it)
       while (i < pts.length) {
         final dx = pts[i].dx - h.dx, dy = pts[i].dy - h.dy;
         final d2 = dx * dx + dy * dy;
-        if (d2 < lim2) {
-          if (wrapAngle(atan2(dy, dx) - s.angle).abs() < 1.7) {
-            _dodge(s, lim);
+        if (d2 < reach2) {
+          final fwd = dx * ca + dy * sa; // how far in front of the head
+          final lat = (-dx * sa + dy * ca).abs(); // how far to the side
+          if (fwd > -s.radius && fwd < look && lat < half) {
+            _dodge(s, look);
             return true;
           }
           i++;
           continue;
         }
-        final skip = ((sqrt(d2) - lim) / sp).floor(); // body points are at most one spacing apart
+        final skip = ((sqrt(d2) - reach) / sp).floor(); // body points are at most one spacing apart
         i += skip > 1 ? skip : 1;
       }
     }
@@ -1174,7 +1193,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   // turn to the side that has the most free space (also looks at the map walls); big U-turn only if needed
   void _dodge(Snake s, double lim) {
     final h = s.head;
-    final probe = lim * 1.2 + 40;
+    final probe = lim + 60;
     double bestA = s.angle, bestScore = -1e9;
     for (final da in const [-1.3, -0.7, 0.7, 1.3, -2.3, 2.3]) {
       final a = s.angle + da;
